@@ -1,0 +1,13 @@
+{
+  "museum": [1.5, 2.5],
+  "park": [1.0, 2.0],
+  "restaurant": [1.0, 2.5],
+  "zoo": [2.0, 3.0],
+  "shopping_mall": [1.5, 3.0],
+  "beach": [2.0, 4.0],
+  "viewpoint": [0.5, 1.0],
+  "monument": [0.5, 1.5],
+  "cafe": [0.5, 1.5],
+  "church": [0.5, 1.5],
+  "_default": 1.5
+}
