@@ -270,6 +270,131 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             detail=f"Error generating hybrid itinerary: {str(e)}"
         )
 
+@app.post("/api/v2/recommendations/generate", response_model=RecommendationResponse, tags=["ML Recommendations"])
+async def generate_recommendations_endpoint(request: RecommendationRequest):
+    """
+    🧠 MOTOR DE RECOMENDACIONES INTELIGENTE - PARA DÍAS LIBRES
+    
+    ✨ FUNCIONALIDADES:
+    - 🎯 Análisis de preferencias del usuario basado en actividades seleccionadas
+    - 🤝 Filtrado colaborativo ("usuarios como tú también visitaron...")
+    - 🗺️ Optimización geográfica (hidden gems, lugares estratégicos)
+    - ⏰ Factores temporales (popularidad, horarios, clima)
+    - 🆕 Score de novedad (experiencias nuevas vs conocidas)
+    - 📊 Organización automática por días con clustering geográfico
+    
+    🧮 ALGORITMOS DE ML:
+    - Análisis de categorías preferidas con TF-IDF
+    - Clustering KMeans para organización por días  
+    - Scoring multi-dimensional ponderado
+    - Cosine similarity para usuarios similares
+    - Geographic clustering para optimización de rutas
+    
+    📝 CASOS DE USO:
+    - "Tengo 2 días libres en mi viaje, ¿qué me recomiendas?"
+    - "Ya elegí museos y parques, ¿qué más podría interesarme?"
+    - "Quiero descubrir lugares únicos cerca de mi hotel"
+    - "Busco experiencias locales auténticas"
+    
+    🎯 PERSONALIZACIÓN:
+    - Respeta radius de exploración inferido
+    - Considera nivel de actividad (indoor/outdoor)
+    - Balancea novedad vs preferencias conocidas
+    - Incluye explicaciones de por qué se recomienda cada lugar
+    """
+    from services.recommendation_engine import RecommendationEngine
+    from utils.analytics import analytics
+    import time
+    
+    start_time = time.time()
+    
+    try:
+        # Track request
+        analytics.track_request("ml_recommendations", {
+            "activities_count": len(request.user_activities),
+            "free_days": request.free_days,
+            "has_preferences": bool(request.preferences),
+            "user_location": str(request.user_location)
+        })
+        
+        # Inicializar motor de recomendaciones
+        recommendation_engine = RecommendationEngine()
+        
+        # Generar recomendaciones
+        recommendations_data = recommendation_engine.generate_recommendations(
+            user_activities=request.user_activities,
+            free_days=request.free_days,
+            user_location=request.user_location,
+            preferences=request.preferences
+        )
+        
+        # Construir respuesta
+        recommendations = []
+        for rec_data in recommendations_data:
+            recommendations.append(Recommendation(
+                activity=rec_data['activity'],
+                total_score=rec_data['score'].total_score,
+                preference_score=rec_data['score'].preference_score,
+                geographic_score=rec_data['score'].geographic_score,
+                temporal_score=rec_data['score'].temporal_score,
+                novelty_score=rec_data['score'].novelty_score,
+                confidence=rec_data['score'].confidence,
+                reasoning=rec_data['reasoning'],
+                suggested_day=rec_data.get('suggested_day'),
+                day_order=rec_data.get('day_order')
+            ))
+        
+        # Obtener perfil de usuario para la respuesta
+        user_profile = recommendation_engine._analyze_user_profile(
+            request.user_activities, 
+            request.preferences
+        )
+        
+        # Calcular nivel de confianza
+        confidence_level = "high" if user_profile.confidence_score > 0.7 else \
+                          "medium" if user_profile.confidence_score > 0.4 else "low"
+        
+        # Calcular duración
+        duration = time.time() - start_time
+        
+        # Preparar respuesta
+        response = RecommendationResponse(
+            recommendations=recommendations,
+            user_profile=user_profile,
+            total_recommendations=len(recommendations),
+            recommendations_per_day=len(recommendations) // request.free_days,
+            confidence_level=confidence_level,
+            generated_at=datetime.now().isoformat()
+        )
+        
+        # Track success
+        analytics.track_success("ml_recommendations", {
+            "recommendations_generated": len(recommendations),
+            "confidence_level": confidence_level,
+            "processing_time": duration,
+            "user_categories": list(user_profile.preferred_categories.keys())
+        })
+        
+        logging.info(f"🧠 Recomendaciones ML generadas: {len(recommendations)} lugares en {duration:.2f}s")
+        logging.info(f"🎯 Confianza: {confidence_level}, Perfil: {user_profile.activity_level}")
+        
+        return response
+        
+    except Exception as e:
+        # Log error
+        analytics.track_error("ml_recommendations_error", str(e), {
+            "activities_count": len(request.user_activities),
+            "error_type": type(e).__name__
+        })
+        
+        logging.error(f"❌ Error generating ML recommendations: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating recommendations: {str(e)}"
+        )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

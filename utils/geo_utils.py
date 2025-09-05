@@ -160,3 +160,32 @@ def total_route_time(places: List[Dict[str, Any]], mode: TransportMode = "walk")
         )
     
     return total
+
+# Alias para compatibilidad
+calculate_distance = haversine_km
+
+def get_city_bounds(city_lat: float, city_lon: float, radius_km: float = 50.0) -> dict:
+    """
+    Obtiene los límites de una ciudad aproximados
+    
+    Args:
+        city_lat: Latitud del centro de la ciudad
+        city_lon: Longitud del centro de la ciudad  
+        radius_km: Radio en kilómetros para definir los límites
+        
+    Returns:
+        Dict con límites de la ciudad
+    """
+    min_lat, min_lon, max_lat, max_lon = calculate_bounding_box(
+        city_lat, city_lon, radius_km
+    )
+    
+    return {
+        'min_lat': min_lat,
+        'min_lon': min_lon,
+        'max_lat': max_lat,
+        'max_lon': max_lon,
+        'center_lat': city_lat,
+        'center_lon': city_lon,
+        'radius_km': radius_km
+    }

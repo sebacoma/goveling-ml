@@ -3,6 +3,11 @@ from typing import List, Optional, Literal
 from datetime import date, time
 from enum import Enum
 
+class Coordinates(BaseModel):
+    """Coordenadas geográficas"""
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+
 class TransportMode(str, Enum):
     WALK = "walk"
     DRIVE = "drive"
@@ -89,6 +94,7 @@ class Activity(BaseModel):
     duration_h: float
     lat: float
     lon: float
+    coordinates: Optional[Coordinates] = None
     type: PlaceType
     travel_time_to_next: Optional[float] = None
     confidence_score: Optional[float] = None
@@ -99,6 +105,19 @@ class Activity(BaseModel):
     hotel_name: Optional[str] = None
     hotel_distance_km: Optional[float] = None
     recommended_transport: Optional[str] = None
+    # Campos adicionales para recomendaciones
+    name: Optional[str] = None
+    category: Optional[str] = None
+    estimated_duration: Optional[float] = None
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Auto-genera coordinates si no están presentes
+        if not self.coordinates and self.lat and self.lon:
+            self.coordinates = Coordinates(latitude=self.lat, longitude=self.lon)
+        # Auto-asigna name si no está presente
+        if not self.name and self.place:
+            self.name = self.place
 
 class TravelSummary(BaseModel):
     total_distance_m: int = 0
@@ -129,6 +148,46 @@ class OptimizationMetrics(BaseModel):
     accommodation_based_clustering: Optional[bool] = False
     geographic_clustering: Optional[bool] = True
 
+class UserProfile(BaseModel):
+    """Perfil de usuario inferido para recomendaciones"""
+    preferred_categories: dict = {}
+    activity_level: str = "balanced"  # indoor, outdoor, balanced
+    avg_duration_preference: float = 2.0
+    exploration_radius: float = 10.0  # km
+    budget_level: str = "medium"  # low, medium, high
+    travel_style: str = "explorer"  # explorer, relaxed, cultural, adventure
+    confidence_score: float = 0.5  # Añadido campo faltante
+
+class Recommendation(BaseModel):
+    """Recomendación de lugar para días libres"""
+    activity: "Activity"
+    total_score: float = Field(..., ge=0.0, le=1.0)
+    preference_score: float = Field(..., ge=0.0, le=1.0)
+    geographic_score: float = Field(..., ge=0.0, le=1.0)
+    temporal_score: float = Field(..., ge=0.0, le=1.0)
+    novelty_score: float = Field(..., ge=0.0, le=1.0)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    reasoning: str = ""
+    suggested_day: Optional[int] = None
+    day_order: Optional[int] = None
+
+class RecommendationRequest(BaseModel):
+    """Request para generar recomendaciones"""
+    user_activities: List["Activity"]
+    free_days: int = Field(..., ge=1, le=7)
+    user_location: dict = {"latitude": -33.4489, "longitude": -70.6693}
+    preferences: Optional[dict] = {}
+    include_reasoning: bool = True
+
+class RecommendationResponse(BaseModel):
+    """Response con recomendaciones organizadas"""
+    recommendations: List[Recommendation]
+    user_profile: UserProfile
+    total_recommendations: int
+    recommendations_per_day: int
+    confidence_level: str  # low, medium, high
+    generated_at: str
+
 class SystemInfo(BaseModel):
     optimizer: Optional[str] = None
     version: Optional[str] = None
@@ -140,6 +199,9 @@ class SystemInfo(BaseModel):
     hotel_centroid_clustering: Optional[bool] = False
     geographic_clustering: Optional[bool] = True
     transport_recommendations: Optional[bool] = False
+    # Nuevos campos para recomendaciones ML
+    ml_recommendations: Optional[bool] = False
+    recommendation_engine: Optional[str] = None
 
 class ItineraryResponse(BaseModel):
     days: List[DayPlan]
