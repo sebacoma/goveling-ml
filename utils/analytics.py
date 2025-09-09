@@ -70,6 +70,15 @@ class AnalyticsLogger:
         }
         
         self.logger.error("ANALYTICS", extra=analytics_data)
+    
+    def track_success(self, event_name: str, data: Dict[str, Any]):
+        """Track successful operations"""
+        analytics_data = {
+            'event': f'{event_name}_success',
+            'timestamp': datetime.now().isoformat(),
+            **data
+        }
+        self.logger.info("ANALYTICS", extra=analytics_data)
 
 # Crear instancia global
 analytics = AnalyticsLogger()

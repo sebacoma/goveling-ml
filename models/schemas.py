@@ -216,3 +216,35 @@ class ItineraryResponse(BaseModel):
     optimization_metrics: Optional[OptimizationMetrics] = None
     recommendations: Optional[List[str]] = []
     system_info: Optional[SystemInfo] = None
+    ml_recommendations: Optional[List[dict]] = None
+    free_days_analysis: Optional[dict] = None
+    free_day_suggestions: Optional[List[dict]] = None  # 🗓️ Sugerencias para días libres
+    suggested_accommodations: Optional[dict] = None     # 🏨 Hoteles recomendados
+
+class HotelRecommendationRequest(BaseModel):
+    """Request para recomendación de hoteles basado en lugares"""
+    places: List[Place]
+    max_recommendations: int = Field(default=5, ge=1, le=10)
+    price_preference: str = Field(default="any", pattern="^(low|medium|high|any)$")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "places": [
+                    {
+                        "name": "Mercado Central",
+                        "lat": -33.4369,
+                        "lon": -70.6506,
+                        "type": "restaurant"
+                    },
+                    {
+                        "name": "Plaza de Armas", 
+                        "lat": -33.4378,
+                        "lon": -70.6504,
+                        "type": "monument"
+                    }
+                ],
+                "max_recommendations": 5,
+                "price_preference": "medium"
+            }
+        }

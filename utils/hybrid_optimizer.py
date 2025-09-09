@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 
 from utils.google_directions_service import GoogleDirectionsService
+from utils.google_maps_client import GoogleMapsClient
 from settings import settings
 
 @dataclass
@@ -23,12 +24,13 @@ class OptimizedActivity:
     start_time: int  # minutos desde medianoche
     end_time: int
     priority: int
+    # Campos opcionales al final
     travel_time_to_next: Optional[int] = None
     zone_cluster: Optional[int] = None
-    # Nuevos campos para hoteles y transporte
     hotel_name: Optional[str] = None
     hotel_distance_km: Optional[float] = None
     recommended_transport: Optional[str] = None
+    opening_hours_info: Optional[str] = None
 
 class HybridIntelligentOptimizer:
     def __init__(self):
@@ -38,6 +40,7 @@ class HybridIntelligentOptimizer:
         # Configuraciones
         self.max_daily_activities = 6
         self.buffer_between_activities = 15  # minutos
+        self.min_activity_spacing = 90      # mínimo 1.5h entre actividades para mejor distribución
         self.max_walking_distance_km = 2.0   # usar Google API si es mayor
         self.cluster_radius_km = 3.0         # agrupar lugares cercanos
         
@@ -228,13 +231,55 @@ class HybridIntelligentOptimizer:
             # Estimar duración de la actividad
             duration = self._estimate_activity_duration(place)
             
+            # Validar y ajustar horario apropiado para el tipo de lugar
+            appropriate_start = self._get_appropriate_start_time(place, current_time)
+            
+            # Si el horario apropiado es diferente, ajustar
+            if appropriate_start != current_time:
+                current_time = appropriate_start
+            
+            # Validar horarios de apertura usando Google Places API
+            is_open, verified_time, hours_info = await self._validate_opening_hours(place, current_time, date)
+            
+            if not is_open:
+                self.logger.warning(f"⚠️ {place['name']} estará cerrado, saltando...")
+                continue
+            
+            if verified_time != current_time:
+                current_time = verified_time
+                self.logger.info(f"🕒 {place['name']}: horario ajustado según apertura real")
+            
             # Verificar si cabe en el día
             activity_end = current_time + duration
             if activity_end > time_window.end:
                 self.logger.warning(f"⚠️ Lugar {place['name']} no cabe en {date} (requiere hasta {int(activity_end)//60}:{int(activity_end)%60:02d})")
                 break
             
-            # Crear actividad
+            # Calcular tiempo de viaje al siguiente lugar y recomendación de transporte ANTES de crear la actividad
+            travel_time = 0
+            recommended_transport = '🚶 Caminar'  # Default mejorado
+            
+            if i < len(places) - 1:
+                next_place = places[i + 1]
+                
+                # Calcular distancia y tiempo de viaje
+                distance_km = self.haversine_km(
+                    place['lat'], place['lon'],
+                    next_place['lat'], next_place['lon']
+                )
+                
+                travel_time = await self.estimate_travel_time_hybrid(
+                    place['lat'], place['lon'],
+                    next_place['lat'], next_place['lon'],
+                    transport_mode
+                )
+                
+                # Recomendar modo de transporte basado en distancia y tiempo
+                recommended_transport = self.recommend_transport_mode(
+                    distance_km, travel_time, [transport_mode, 'walk', 'drive', 'transit']
+                )
+            
+            # Crear actividad CON el transporte ya asignado
             activity = OptimizedActivity(
                 name=place['name'],
                 lat=place['lat'],
@@ -244,29 +289,32 @@ class HybridIntelligentOptimizer:
                 start_time=current_time,
                 end_time=activity_end,
                 priority=place.get('priority', 5),
-                zone_cluster=place.get('cluster_id')
+                zone_cluster=place.get('cluster_id'),
+                opening_hours_info=hours_info,  # Información de horarios verificados
+                recommended_transport=recommended_transport  # Asignar desde la creación
             )
             
-            # Calcular tiempo de viaje al siguiente lugar
-            travel_time = 0
-            if i < len(places) - 1:
-                next_place = places[i + 1]
-                travel_time = await self.estimate_travel_time_hybrid(
-                    place['lat'], place['lon'],
-                    next_place['lat'], next_place['lon'],
-                    transport_mode
-                )
+            # Asignar tiempo de viaje y calcular mejor espaciado
+            if travel_time > 0:
                 activity.travel_time_to_next = int(travel_time)
+                # Calcular espaciado dinámico basado en tiempo disponible
+                available_time = (time_window.end * 60) - current_time
+                remaining_activities = len(places) - (places.index(place) + 1)
                 
-                # Actualizar tiempo actual
-                current_time = activity_end + travel_time + self.buffer_between_activities
+                if remaining_activities > 0 and available_time > (remaining_activities * 120):  # Si hay mucho tiempo libre
+                    # Usar espaciado más generoso para mejor distribución
+                    dynamic_spacing = min(self.min_activity_spacing, available_time // (remaining_activities + 1))
+                    current_time = activity_end + travel_time + max(self.buffer_between_activities, dynamic_spacing)
+                    self.logger.info(f"  🕒 Espaciado dinámico aplicado: {dynamic_spacing}min")
+                else:
+                    current_time = activity_end + travel_time + self.buffer_between_activities
             else:
                 current_time = activity_end
             
             activities.append(activity)
             
             # Log actividad programada
-            start_str = f"{int(current_time)//60}:{int(current_time)%60:02d}"
+            start_str = f"{int(activity.start_time)//60}:{int(activity.start_time)%60:02d}"
             end_str = f"{int(activity_end)//60}:{int(activity_end)%60:02d}"
             travel_str = f" (viaje: {travel_time}min)" if travel_time > 0 else ""
             self.logger.info(f"  ✓ {place['name']}: {start_str}-{end_str} ({duration}min){travel_str}")
@@ -284,7 +332,7 @@ class HybridIntelligentOptimizer:
             'shopping_mall': 120, # 2 horas
             'beach': 180,         # 3 horas
             'viewpoint': 60,      # 1 hora
-            'monument': 30,       # 30 minutos
+            'monument': 60,       # 1 hora - INCREMENTADO (era muy poco)
             'cafe': 45,           # 45 minutos
             'zoo': 180            # 3 horas
         }
@@ -299,6 +347,171 @@ class HybridIntelligentOptimizer:
             base_duration = int(base_duration * 0.7)  # -30% para baja prioridad
         
         return base_duration
+    
+    def _get_appropriate_start_time(self, place: Dict, proposed_time: int) -> int:
+        """Validar y ajustar horario apropiado según tipo de lugar"""
+        place_type = place['type']
+        
+        # Convertir PlaceType enum a string si es necesario
+        if hasattr(place_type, 'value'):
+            place_type = place_type.value
+        elif not isinstance(place_type, str):
+            place_type = str(place_type).lower()
+        
+        # Asegurar que proposed_time es entero
+        proposed_time = int(proposed_time)
+        
+        # Horarios apropiados por tipo (en minutos desde medianoche)
+        time_rules = {
+            'restaurant': {
+                'breakfast': (420, 660),    # 7:00-11:00 desayuno
+                'lunch': (720, 900),        # 12:00-15:00 almuerzo
+                'dinner': (1080, 1320)      # 18:00-22:00 cena
+            },
+            'cafe': {
+                'morning': (420, 720),      # 7:00-12:00 mañana
+                'afternoon': (840, 1080)    # 14:00-18:00 tarde
+            },
+            'museum': (600, 1020),          # 10:00-17:00
+            'church': (480, 1200),          # 8:00-20:00
+            'shopping_mall': (600, 1320),   # 10:00-22:00
+            'park': (360, 1200),            # 6:00-20:00 (flexible)
+            'beach': (480, 1080),           # 8:00-18:00
+            'viewpoint': (360, 1200),       # 6:00-20:00 (flexible)
+            'monument': (480, 1080),        # 8:00-18:00
+            'zoo': (540, 1020)              # 9:00-17:00
+        }
+        
+        # Si no hay reglas específicas, usar horario propuesto
+        if place_type not in time_rules:
+            return proposed_time
+        
+        rules = time_rules[place_type]
+        
+        # Para restaurantes, determinar mejor franja horaria
+        if place_type == 'restaurant':
+            # Lógica mejorada: priorizar almuerzo para horarios entre 9:00-17:00
+            if 420 <= proposed_time <= 540:     # Muy temprano (7:00-9:00) -> desayuno
+                start, end = rules['breakfast']
+            elif 540 <= proposed_time <= 1020:  # Día (9:00-17:00) -> FORZAR ALMUERZO
+                start, end = rules['lunch']
+                # Si está antes del almuerzo, ajustar al inicio del almuerzo
+                if proposed_time < 720:  # antes de 12:00
+                    proposed_time = 720  # forzar a 12:00
+            elif proposed_time >= 1020:         # Noche (17:00+)
+                start, end = rules['dinner']
+            else:  # Caso de seguridad
+                start, end = rules['lunch']
+        
+        # Para cafés, elegir franja apropiada
+        elif place_type == 'cafe':
+            if proposed_time <= 720:
+                start, end = rules['morning']
+            else:
+                start, end = rules['afternoon']
+        
+        # Para otros lugares, usar rango directo
+        else:
+            start, end = rules
+        
+        # Ajustar tiempo propuesto al rango válido
+        if proposed_time < start:
+            adjusted_time = start
+            self.logger.info(f"⏰ {place['name']} ({place_type}): ajustado de {proposed_time//60}:{proposed_time%60:02d} a {adjusted_time//60}:{adjusted_time%60:02d}")
+            return adjusted_time
+        elif proposed_time > end:
+            # Si es muy tarde, programar para el día siguiente en horario válido
+            adjusted_time = start
+            self.logger.warning(f"⚠️ {place['name']} ({place_type}): muy tarde, programar para horario válido {adjusted_time//60}:{adjusted_time%60:02d}")
+            return adjusted_time
+        else:
+            self.logger.info(f"✅ {place['name']} ({place_type}): horario {proposed_time//60}:{proposed_time%60:02d} es apropiado")
+            return proposed_time
+    
+    def _get_meal_type(self, place_type: str, start_time: int) -> Optional[str]:
+        """Determinar tipo de comida según horario"""
+        if place_type not in ['restaurant', 'cafe']:
+            return None
+        
+        # Convertir PlaceType enum a string si es necesario
+        if hasattr(place_type, 'value'):
+            place_type = place_type.value
+        elif not isinstance(place_type, str):
+            place_type = str(place_type).lower()
+        
+        start_time = int(start_time)
+        
+        if place_type == 'restaurant':
+            if 420 <= start_time <= 660:    # 7:00-11:00
+                return "desayuno"
+            elif 720 <= start_time <= 900:  # 12:00-15:00
+                return "almuerzo"
+            elif 1080 <= start_time <= 1320: # 18:00-22:00
+                return "cena"
+            else:
+                return "comida"
+        elif place_type == 'cafe':
+            if 420 <= start_time <= 720:    # 7:00-12:00
+                return "desayuno/merienda"
+            else:
+                return "merienda"
+        
+        return None
+    
+    async def _validate_opening_hours(self, place: Dict, proposed_time: int, date: str) -> Tuple[bool, int, Optional[str]]:
+        """Validar horarios de apertura usando Google Places API"""
+        try:
+            # Usar Google Places API para obtener horarios reales
+            async with GoogleMapsClient() as client:
+                place_details = await client.get_place_details(
+                    place_name=place['name'],
+                    lat=place['lat'],
+                    lon=place['lon']
+                )
+                
+                opening_hours = place_details.get('opening_hours', {})
+                parsed_hours = opening_hours.get('parsed_hours', {})
+                
+                # Convertir fecha a día de la semana (0=Lunes, 6=Domingo)
+                from datetime import datetime
+                date_obj = datetime.strptime(date, '%Y-%m-%d')
+                weekday = date_obj.weekday()  # 0=Monday, 6=Sunday
+                
+                # Verificar si el lugar está abierto ese día
+                if weekday not in parsed_hours:
+                    self.logger.warning(f"⚠️ {place['name']}: No hay horarios para {date}")
+                    return True, proposed_time, "sin horarios específicos"
+                
+                open_time_str, close_time_str = parsed_hours[weekday]
+                
+                # Convertir horarios a minutos
+                def time_str_to_minutes(time_str: str) -> int:
+                    hours, minutes = map(int, time_str.split(':'))
+                    return hours * 60 + minutes
+                
+                open_minutes = time_str_to_minutes(open_time_str)
+                close_minutes = time_str_to_minutes(close_time_str)
+                
+                # Verificar si el horario propuesto está dentro del horario de apertura
+                if open_minutes <= proposed_time <= close_minutes - 60:  # Al menos 1h antes del cierre
+                    return True, proposed_time, f"abierto {open_time_str}-{close_time_str}"
+                
+                # Si está cerrado, ajustar al horario de apertura
+                if proposed_time < open_minutes:
+                    adjusted_time = open_minutes
+                    self.logger.info(f"⏰ {place['name']}: ajustado a horario apertura {open_time_str}")
+                    return True, adjusted_time, f"ajustado a apertura ({open_time_str})"
+                elif proposed_time > close_minutes - 60:
+                    # Muy tarde, programar para el día siguiente
+                    self.logger.warning(f"⚠️ {place['name']}: cierra a {close_time_str}, muy tarde para visitar")
+                    return False, proposed_time, f"cierra {close_time_str}"
+                
+                return True, proposed_time, f"horario verificado {open_time_str}-{close_time_str}"
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error validando horarios para {place['name']}: {e}")
+            # En caso de error, usar validación de horarios por defecto
+            return True, proposed_time, "horarios no verificados"
     
     def format_activities_for_api(self, daily_schedule: Dict[str, List[OptimizedActivity]]) -> Dict:
         """Formatear actividades para respuesta API"""
@@ -334,6 +547,10 @@ class HybridIntelligentOptimizer:
                     estimated_distance = (travel_time_next / 60) * 5  # 5 km/h velocidad promedio
                     day_distance += estimated_distance
                 
+                # Determinar tipo de comida si es restaurante/cafe
+                meal_type = self._get_meal_type(activity.type, activity.start_time)
+                meal_context = f" ({meal_type})" if meal_type else ""
+                
                 formatted_activities.append({
                     'place': activity.name,
                     'start': minutes_to_time_str(activity.start_time),
@@ -345,7 +562,12 @@ class HybridIntelligentOptimizer:
                     'travel_time_to_next': travel_time_next,
                     'zone_cluster': activity.zone_cluster,
                     'priority': activity.priority,
-                    'confidence_score': 0.9  # Sistema híbrido tiene alta confianza
+                    'confidence_score': 0.9,  # Sistema híbrido tiene alta confianza
+                    'meal_type': meal_type,  # Nuevo campo
+                    'display_name': f"{activity.name}{meal_context}",  # Nombre con contexto
+                    'opening_hours_info': activity.opening_hours_info,  # Horarios verificados
+                    'verified_schedule': True if activity.opening_hours_info and 'verificado' in activity.opening_hours_info else False,
+                    'recommended_transport': activity.recommended_transport  # ✅ CAMPO FALTANTE AGREGADO
                 })
             
             # Calcular tiempo libre del día
@@ -361,29 +583,56 @@ class HybridIntelligentOptimizer:
             else:
                 center_lat, center_lon = 0, 0
             
+            # Añadir contexto de comidas si hay restaurantes/cafés
+            restaurants = [a for a in activities if a.type in ['restaurant', 'cafe']]
+            recommendations = [
+                f"Día optimizado con {len(activities)} actividades",
+                f"Tiempo libre: {free_minutes} minutos",
+                f"Distancia total: {round(day_distance, 1)}km",
+                f"Tiempo de traslados: {int(day_travel_time)}min",
+                f"Medios de transporte: {', '.join(set(a.recommended_transport for a in activities if a.recommended_transport))}",
+                f"Clusters visitados: {len(set(a.zone_cluster for a in activities if a.zone_cluster is not None))}"
+            ]
+            
+            if restaurants:
+                meal_info = []
+                for rest in restaurants:
+                    meal_type = self._get_meal_type(rest.type, rest.start_time)
+                    if meal_type:
+                        meal_info.append(f"{rest.name} ({meal_type})")
+                if meal_info:
+                    recommendations.append(f"Comidas programadas: {', '.join(meal_info)}")
+            
+            # Añadir información sobre horarios verificados
+            verified_count = sum(1 for a in activities if a.opening_hours_info and 'verificado' in str(a.opening_hours_info))
+            if verified_count > 0:
+                recommendations.append(f"🕒 {verified_count} lugares con horarios verificados por Google")
+            
+            # Advertencias sobre lugares con horarios ajustados
+            adjusted_places = [a for a in activities if a.opening_hours_info and 'ajustado' in str(a.opening_hours_info)]
+            if adjusted_places:
+                place_names = [a.name for a in adjusted_places]
+                recommendations.append(f"⏰ Horarios ajustados: {', '.join(place_names)}")
+            
             formatted_days.append({
-                'date': date,
-                'activities': formatted_activities,
-                'lodging': {
-                    'name': f'Área central {date}',
-                    'lat': center_lat,
-                    'lon': center_lon
-                },
-                'free_minutes': free_minutes,
-                'total_walking_km': round(day_distance, 2),
-                'travel_summary': {
-                    'total_distance_m': int(day_distance * 1000),
-                    'total_travel_time_s': day_travel_time * 60,
-                    'transport_mode': 'hybrid',
-                    'route_polyline': None
-                },
-                'recommendations': [
-                    f"Día optimizado con {len(activities)} actividades",
-                    f"Tiempo libre: {free_minutes} minutos",
-                    f"Clusters visitados: {len(set(a.zone_cluster for a in activities if a.zone_cluster is not None))}"
-                ],
-                'zone_clusters_visited': list(set(a.zone_cluster for a in activities if a.zone_cluster is not None))
-            })
+                    'date': date,
+                    'activities': formatted_activities,
+                    'lodging': {
+                        'name': f'Área central {date}',
+                        'lat': center_lat,
+                        'lon': center_lon
+                    },
+                    'free_minutes': free_minutes,
+                    'total_walking_km': round(day_distance, 2),
+                    'travel_summary': {
+                        'total_distance_m': int(day_distance * 1000),
+                        'total_travel_time_s': day_travel_time * 60,
+                        'transport_mode': 'hybrid',
+                        'route_polyline': None
+                    },
+                    'recommendations': recommendations,
+                    'zone_clusters_visited': list(set(a.zone_cluster for a in activities if a.zone_cluster is not None))
+                })
             
             total_activities += len(activities)
             total_travel_time += day_travel_time
@@ -469,20 +718,22 @@ class HybridIntelligentOptimizer:
         if not available_modes:
             available_modes = ['walk', 'drive', 'transit']
             
-        # Lógica de recomendación inteligente
-        if distance_km <= 0.5:
-            return 'walk'  # Distancias muy cortas, siempre caminar
+        # Lógica de recomendación inteligente con instrucciones
+        if distance_km <= 0.3:
+            return '🚶 Caminar'  # Muy cerca
+        elif distance_km <= 0.8:
+            return '🚶 Caminar'  # Caminata corta
         elif distance_km <= 2.0:
             if travel_time_min <= 25:
-                return 'walk'  # Caminata razonable
+                return '🚶 Caminar'  # Caminata razonable
             else:
-                return 'transit' if 'transit' in available_modes else 'drive'
+                return '🚌 Transporte público' if 'transit' in available_modes else '🚗 Auto/Taxi'
         elif distance_km <= 5.0:
-            return 'drive' if 'drive' in available_modes else 'transit'
+            return '🚗 Auto/Taxi' if 'drive' in available_modes else '🚌 Transporte público'
         elif distance_km <= 15.0:
-            return 'drive'
+            return '🚗 Auto/Taxi'
         else:
-            return 'drive'  # Distancias largas siempre en auto
+            return '🚗 Auto/Taxi'  # Distancias largas
 
     async def schedule_with_hotels(self, places: List[Dict], 
                                  accommodations: List[Dict],
@@ -754,7 +1005,9 @@ class HybridIntelligentOptimizer:
             recommendations = [
                 f"Día optimizado con {len(activities)} actividades",
                 f"Tiempo libre: {free_minutes} minutos",
-                f"Transporte recomendado: {', '.join(set(a.recommended_transport for a in activities))}"
+                f"Distancia total: {round(day_distance, 1)}km",
+                f"Tiempo de traslados: {int(day_travel_time)}min",
+                f"Medios de transporte: {', '.join(set(a.recommended_transport for a in activities if a.recommended_transport))}"
             ]
             
             if activities and activities[0].hotel_name:
