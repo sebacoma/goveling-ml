@@ -57,10 +57,13 @@ class Settings(BaseSettings):
     WALK_KMH: float = 4.5              # Velocidad caminando
     DRIVE_KMH: float = 50.0            # Velocidad en auto (interurbano)
     TRANSIT_KMH: float = 35.0          # Velocidad transporte público
+    AIR_SPEED_KMPH: float = 750.0      # Velocidad promedio vuelo comercial (incluyendo tiempo aeropuerto)
+    AIR_BUFFERS_MIN: int = 90          # Buffers aeropuerto (check-in, security, boarding, etc.)
     
     # Políticas de transporte por distancia
     WALK_THRESHOLD_KM: float = 2.0     # <= 2km: caminar OK
     DRIVE_THRESHOLD_KM: float = 15.0   # > 15km: driving recomendado
+    FLIGHT_THRESHOLD_KM: float = 1000.0 # > 1000km: vuelo recomendado
     TRANSIT_AVAILABLE: bool = True      # Si hay transporte público disponible
     
     # Ventanas horarias por tipo de lugar

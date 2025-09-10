@@ -124,6 +124,17 @@ class HybridOptimizerV31:
             )
             cluster_objects.append(cluster_obj)
         
+        # 🔒 GARANTÍA: Siempre al menos 1 cluster (no levantamos excepción)
+        if not cluster_objects:
+            self.logger.warning("⚠️ DBSCAN no creó clusters - creando cluster único de emergencia")
+            centroid = self._calculate_centroid(pois)
+            emergency_cluster = Cluster(
+                label="emergency_single",
+                centroid=centroid,
+                places=pois
+            )
+            cluster_objects = [emergency_cluster]
+        
         self.logger.info(f"✅ {len(cluster_objects)} clusters creados")
         return cluster_objects
     
@@ -689,9 +700,26 @@ class HybridOptimizerV31:
                     else:
                         transport_time += item.duration_minutes
         
+        # 🔍 VALIDAR COHERENCIA GEOGRÁFICA para evitar context leakage
+        # Si current_location está muy lejos del cluster del día, usar la base del cluster
+        suggestions_origin = current_location
+        if current_location and assigned_clusters:
+            main_cluster = assigned_clusters[0]  # Cluster principal del día
+            if main_cluster.home_base:
+                cluster_location = (main_cluster.home_base['lat'], main_cluster.home_base['lon'])
+                distance_to_cluster = haversine_km(
+                    current_location[0], current_location[1],
+                    cluster_location[0], cluster_location[1]
+                )
+                
+                # Si la ubicación actual está > 100km del cluster, usar la base del cluster
+                if distance_to_cluster > 100:
+                    suggestions_origin = cluster_location
+                    self.logger.warning(f"🌍 Context leakage evitado: current_location ({current_location}) → cluster_base ({cluster_location}) - distancia: {distance_to_cluster:.1f}km")
+        
         # Generar free blocks con sugerencias mejoradas y recomendaciones procesables
         free_blocks = await self._generate_free_blocks_enhanced(
-            current_time, daily_window.end, current_location
+            current_time, daily_window.end, suggestions_origin
         )
         
         # Generar recomendaciones procesables
@@ -725,28 +753,64 @@ class HybridOptimizerV31:
     
     async def _build_enhanced_transfer(
         self,
-        origin: Tuple[float, float],
+        origin: Tuple[float, float], 
         destination: Tuple[float, float],
         transport_mode: str,
         target_cluster: Cluster
     ) -> TransferItem:
-        """Construir transfer con nombres reales de lugares"""
-        eta_info = await self.google_service.eta_between(origin, destination, transport_mode)
+        """
+        🚀 TRANSFER MEJORADO: Siempre funciona, aún si Google Directions falla
+        Genera intercity_transfer cuando distancia > 30km con ETA por velocidad promedio
+        """
         
-        # Determinar nombres reales
-        from_place = await self._get_nearest_named_place(origin)
-        to_place = target_cluster.home_base['name'] if target_cluster.home_base else await self._get_nearest_named_place(destination)
+        # 🗺️ Intentar Google Directions primero
+        try:
+            eta_info = await self.google_service.eta_between(origin, destination, transport_mode)
+        except Exception as e:
+            self.logger.warning(f"⚠️ Google Directions falló: {e} - usando fallback ETA")
+            # 📊 Fallback ETA con velocidad promedio
+            from utils.geo_utils import haversine_km
+            distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
+            
+            # Auto-selección de modo para distancias > 30km
+            if distance_km > 30.0 and transport_mode in ["walk", "walking"]:
+                transport_mode = "drive"
+                self.logger.info(f"🚗 Distancia {distance_km:.1f}km > 30km: forzando mode=drive en fallback")
+            
+            speed_kmh = settings.DRIVE_KMH if transport_mode == "drive" else settings.WALK_KMH
+            duration_minutes = (distance_km / speed_kmh) * 60 * 1.3  # 30% buffer
+            
+            eta_info = {
+                'distance_km': distance_km,
+                'duration_minutes': duration_minutes,
+                'status': 'FALLBACK_ETA',
+                'google_enhanced': False
+            }
+        
+        # Determinar nombres reales (sin fallar)
+        try:
+            from_place = await self._get_nearest_named_place(origin)
+        except:
+            from_place = f"Ubicación ({origin[0]:.3f}, {origin[1]:.3f})"
+            
+        try:
+            to_place = target_cluster.home_base['name'] if target_cluster.home_base else await self._get_nearest_named_place(destination)
+        except:
+            to_place = f"Destino ({destination[0]:.3f}, {destination[1]:.3f})"
         
         # Aplicar política de transporte
         final_mode = self._decide_mode_by_distance_km(eta_info['distance_km'], transport_mode)
         
-        if final_mode != eta_info.get('recommended_mode', transport_mode):
-            self.logger.info(f"🚗 Modo forzado: {transport_mode} → {final_mode}")
-            eta_info = await self.google_service.eta_between(origin, destination, final_mode)
+        # 🚗 Forzar modo si distancia > 30km
+        if eta_info['distance_km'] > 30.0:
+            if final_mode in ["walk", "walking"]:
+                final_mode = "drive"
+                self.logger.info(f"🚗 INTERCITY: {eta_info['distance_km']:.1f}km > 30km - forzando drive")
         
-        is_intercity = eta_info['distance_km'] > settings.INTERCITY_THRESHOLD_KM_URBAN
+        # ✅ GARANTÍA: is_intercity = True para distancias > 30km
+        is_intercity = eta_info['distance_km'] > 30.0
         
-        return TransferItem(
+        transfer = TransferItem(
             type="transfer",
             from_place=from_place,
             to_place=to_place,
@@ -755,7 +819,104 @@ class HybridOptimizerV31:
             recommended_mode=final_mode,
             is_intercity=is_intercity
         )
+        
+        if is_intercity:
+            self.logger.info(f"🌍 INTERCITY TRANSFER: {from_place} → {to_place} ({eta_info['distance_km']:.1f}km, {int(eta_info['duration_minutes'])}min)")
+        
+        return transfer
     
+    async def _inject_intercity_transfers_between_days(self, days: List[Dict]) -> None:
+        """
+        🌍 DETECCIÓN Y CREACIÓN DE INTERCITY TRANSFERS ENTRE DÍAS
+        Detecta cuando hay cambio de cluster entre días consecutivos y crea transfers intercity
+        """
+        for i in range(len(days) - 1):
+            curr_day = days[i]
+            next_day = days[i + 1]
+            
+            # Verificar que ambos días tengan base
+            curr_base = curr_day.get('base')
+            next_base = next_day.get('base')
+            
+            if not curr_base or not next_base:
+                continue
+                
+            # Calcular distancia entre bases
+            distance_km = haversine_km(
+                curr_base['lat'], curr_base['lon'],
+                next_base['lat'], next_base['lon']
+            )
+            
+            # Si distancia > 30km, crear intercity transfer
+            if distance_km > 30:
+                self.logger.info(f"🌍 Intercity transfer detectado: {curr_base['name']} → {next_base['name']} ({distance_km:.1f}km)")
+                
+                # Intentar ETA con Google Directions
+                transfer_mode = "drive"
+                try:
+                    eta_info = await self.google_service.eta_between(
+                        (curr_base['lat'], curr_base['lon']),
+                        (next_base['lat'], next_base['lon']),
+                        transfer_mode
+                    )
+                    
+                    # Si Google falla o es cruce oceánico muy largo, usar heurística de vuelo
+                    if (eta_info.get('status') in ['ZERO_RESULTS', 'FALLBACK_ETA'] and distance_km > 1000) or distance_km > settings.FLIGHT_THRESHOLD_KM:
+                        transfer_mode = "flight"
+                        eta_min = int((distance_km / settings.AIR_SPEED_KMPH) * 60 + settings.AIR_BUFFERS_MIN)
+                        eta_info = {
+                            'distance_km': distance_km,
+                            'duration_minutes': eta_min,
+                            'status': 'FLIGHT_HEURISTIC',
+                            'google_enhanced': False
+                        }
+                        self.logger.info(f"✈️ Modo vuelo aplicado: {distance_km:.1f}km → {eta_min}min")
+                    
+                except Exception as e:
+                    # Fallback completo - usar vuelo para distancias largas
+                    self.logger.warning(f"⚠️ Google Directions falló: {e}")
+                    if distance_km > 500:
+                        transfer_mode = "flight"
+                        eta_min = int((distance_km / settings.AIR_SPEED_KMPH) * 60 + settings.AIR_BUFFERS_MIN)
+                    else:
+                        transfer_mode = "drive"
+                        eta_min = int((distance_km / settings.DRIVE_KMH) * 60 * 1.3)  # 30% buffer
+                    
+                    eta_info = {
+                        'distance_km': distance_km,
+                        'duration_minutes': eta_min,
+                        'status': 'FALLBACK_HEURISTIC',
+                        'google_enhanced': False
+                    }
+                
+                # Crear transfer intercity
+                intercity_transfer = {
+                    "type": "intercity_transfer",
+                    "from": curr_base['name'],
+                    "to": next_base['name'],
+                    "distance_km": eta_info['distance_km'],
+                    "duration_minutes": int(eta_info['duration_minutes']),
+                    "mode": transfer_mode,
+                    "time": "09:00",  # Asumimos traslado temprano
+                    "overnight": False,
+                    "has_activity": False,
+                    "is_between_days": True
+                }
+                
+                # Inyectar al inicio del día destino
+                if 'transfers' not in next_day:
+                    next_day['transfers'] = []
+                next_day['transfers'].insert(0, intercity_transfer)
+                
+                # Actualizar travel_summary del día destino
+                travel_summary = next_day.get('travel_summary', {})
+                travel_summary['intercity_transfers_count'] = travel_summary.get('intercity_transfers_count', 0) + 1
+                travel_summary['intercity_total_minutes'] = travel_summary.get('intercity_total_minutes', 0) + int(eta_info['duration_minutes'])
+                travel_summary['transport_time_minutes'] = travel_summary.get('transport_time_minutes', 0) + int(eta_info['duration_minutes'])
+                travel_summary['total_distance_km'] = travel_summary.get('total_distance_km', 0) + eta_info['distance_km']
+                
+                self.logger.info(f"✅ Intercity transfer inyectado: {transfer_mode}, {int(eta_info['duration_minutes'])}min")
+
     async def _get_nearest_named_place(self, location: Tuple[float, float]) -> str:
         """Obtener el nombre del lugar más cercano"""
         try:
@@ -1015,11 +1176,22 @@ class HybridOptimizerV31:
         user_location: Tuple[float, float],
         block_duration: int
     ) -> List[Dict]:
-        """💎 Enriquecer sugerencias con ETAs y razones"""
+        """💎 Enriquecer sugerencias con ETAs y razones + filtro por distancia coherente"""
         enriched = []
+        max_distance_km = 50.0  # Máximo 50km desde la base del día
         
         for suggestion in raw_suggestions:
             try:
+                # 🔍 FILTRO POR DISTANCIA: descartar sugerencias muy lejas de la base del día
+                distance_km = haversine_km(
+                    user_location[0], user_location[1],
+                    suggestion['lat'], suggestion['lon']
+                )
+                
+                if distance_km > max_distance_km:
+                    self.logger.debug(f"🚫 Sugerencia descartada: {suggestion['name']} ({distance_km:.1f}km > {max_distance_km}km)")
+                    continue
+                
                 # Calcular ETA real
                 eta_info = await self.google_service.eta_between(
                     user_location,
@@ -1124,6 +1296,8 @@ class HybridOptimizerV31:
         
         return {
             'efficiency_score': efficiency_score,
+            'optimization_mode': 'geographic_v31',  # ← Modo correcto V3.1
+            'fallback_active': False,  # ← No fallback
             'total_distance_km': total_distance_km,
             'total_travel_time_minutes': total_travel_minutes,
             'walking_time_minutes': total_walking_time,
@@ -1250,7 +1424,37 @@ async def optimize_itinerary_hybrid_v31(
     # 1. Clustering POIs
     clusters = optimizer.cluster_pois(places)
     if not clusters:
-        return {"error": "No se pudieron crear clusters", "days": []}
+        # 🔒 NUNCA retornar None/estructura parcial - crear estructura completa
+        empty_days = {}
+        for i in range((end_date - start_date).days + 1):
+            date_key = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
+            empty_days[date_key] = {
+                "day": i + 1,
+                "date": date_key,
+                "activities": [],
+                "transfers": [],
+                "free_blocks": [],
+                "base": None,
+                "travel_summary": {
+                    "total_travel_time_s": 0,
+                    "walking_time_minutes": 0,
+                    "transport_time_minutes": 0,
+                    "intercity_transfers_count": 0,
+                }
+            }
+        
+        return {
+            "days": empty_days,
+            "optimization_metrics": {
+                "efficiency_score": 0.1,
+                "optimization_mode": "emergency_empty",
+                "error": "No se pudieron crear clusters",
+                "fallback_active": True,
+                "total_clusters": 0,
+                "total_activities": 0,
+                "total_intercity_distance_km": 0
+            }
+        }
     
     # 2. Enhanced home base assignment
     clusters = await optimizer.assign_home_base_to_clusters(clusters, accommodations)
@@ -1296,6 +1500,9 @@ async def optimize_itinerary_hybrid_v31(
         )
         days.append(day_result)
         previous_end_location = day_result.get('end_location')
+    
+    # 🌍 DETECCIÓN DE INTERCITY TRANSFERS ENTRE DÍAS
+    await optimizer._inject_intercity_transfers_between_days(days)
     
     # 6. Enhanced metrics
     optimization_metrics = optimizer.calculate_enhanced_metrics(days)

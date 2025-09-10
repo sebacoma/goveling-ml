@@ -79,8 +79,11 @@ class GoogleDirectionsService:
                             "status": "OK",
                             "google_enhanced": True
                         }
+                    elif data.get("status") == "ZERO_RESULTS":
+                        logging.warning("Google Directions ZERO_RESULTS - usando fallback ETA")
+                        return self._fallback_route_info(origin, destination, mode)
                     else:
-                        logging.warning(f"Google Directions API error: {data.get('status')}")
+                        logging.warning(f"Google Directions API error: {data.get('status')} - usando fallback ETA")
                         return self._fallback_route_info(origin, destination, mode)
                         
         except asyncio.TimeoutError:
@@ -96,18 +99,69 @@ class GoogleDirectionsService:
         destination: Tuple[float, float], 
         mode: str
     ) -> Dict:
-        """Fallback usando cálculos simples cuando Google API no está disponible"""
-        from utils.geo_utils import haversine_km, estimate_travel_minutes
+        """
+        🚀 FALLBACK MEJORADO: ETA con velocidad promedio configurable + buffers
+        No levanta excepciones que disparen fallback_basic
+        """
+        from utils.geo_utils import haversine_km
         
         distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
-        duration_min = estimate_travel_minutes(origin[0], origin[1], destination[0], destination[1], mode)
+        
+        # 🚗 Auto-selección de modo para distancias > 30km
+        original_mode = mode
+        if distance_km > 30.0:
+            if mode == "walk" or mode == "walking":
+                mode = "drive"  # Forzar driving para distancias largas
+                logging.info(f"🚗 Distancia {distance_km:.1f}km > 30km: forzando mode=drive")
+        
+        # 🏃‍♂️ Velocidades configurables con buffers
+        speed_map = {
+            "walk": settings.WALK_KMH,           # 4.5 km/h
+            "walking": settings.WALK_KMH,        # 4.5 km/h  
+            "drive": settings.DRIVE_KMH,         # 50.0 km/h (interurbano)
+            "driving": settings.DRIVE_KMH,       # 50.0 km/h
+            "transit": settings.TRANSIT_KMH,     # 35.0 km/h
+            "bike": 15.0,                        # Velocidad bicicleta
+            "bicycling": 15.0
+        }
+        
+        base_speed_kmh = speed_map.get(mode, settings.DRIVE_KMH)
+        
+        # ⏱️ Cálculo ETA base + buffers inteligentes
+        base_duration_hours = distance_km / base_speed_kmh
+        base_duration_min = base_duration_hours * 60
+        
+        # 📊 Buffers según distancia y modo
+        if distance_km < 5:
+            buffer_factor = 1.2  # 20% buffer para trayectos cortos
+        elif distance_km < 30:
+            buffer_factor = 1.3  # 30% buffer para trayectos medios
+        else:
+            buffer_factor = 1.4  # 40% buffer para trayectos largos (intercity)
+            
+        # Buffers adicionales por modo de transporte
+        if mode in ["transit"]:
+            buffer_factor += 0.2  # +20% para transporte público (esperas)
+        elif mode in ["walk", "walking"]:
+            buffer_factor += 0.1  # +10% para caminata (semáforos, etc)
+        
+        final_duration_min = base_duration_min * buffer_factor
+        
+        # 🕐 Mínimo realista
+        final_duration_min = max(final_duration_min, settings.MIN_TRAVEL_MIN)
+        
+        logging.info(f"📊 Fallback ETA: {distance_km:.1f}km @ {base_speed_kmh}km/h = {final_duration_min:.0f}min (mode: {original_mode}→{mode})")
         
         return {
-            "duration_minutes": duration_min,
+            "duration_minutes": final_duration_min,
             "distance_km": distance_km,
             "polyline": "",
-            "status": "FALLBACK",
-            "google_enhanced": False
+            "status": "FALLBACK_ETA",
+            "google_enhanced": False,
+            "mode_adjusted": mode != original_mode,
+            "original_mode": original_mode,
+            "final_mode": mode,
+            "buffer_applied": round(buffer_factor, 2)
         }
     
     async def get_optimized_route_order(

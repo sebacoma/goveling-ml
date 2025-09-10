@@ -271,7 +271,24 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 
             except Exception as e:
                 last_error = e
-                logger.warning(f"Intento {attempt + 1}/{max_retries} falló: {e}")
+                
+                # 🔍 LOGGING EXHAUSTIVO DEL ERROR
+                import traceback
+                error_repr = repr(e)
+                error_traceback = traceback.format_exc()
+                error_code = f"OPT_ERR_{attempt + 1}_{type(e).__name__}"
+                
+                logger.error(f"❌ {error_code}: {error_repr}")
+                logger.error(f"📊 Traceback completo:\n{error_traceback}")
+                logger.error(f"🔢 Intento {attempt + 1}/{max_retries} - Lugares: {len(normalized_places)}")
+                
+                # Analizar tipo de error específico
+                if "Geographic coherence error" in str(e):
+                    logger.error("🌍 Error de coherencia geográfica detectado")
+                elif "google_service" in str(e):
+                    logger.error("🗺️ Error de servicio Google detectado")
+                elif "DBSCAN" in str(e) or "cluster" in str(e).lower():
+                    logger.error("🗂️ Error de clustering detectado")
                 
                 if attempt < max_retries - 1:
                     # Esperar antes del siguiente intento
@@ -280,16 +297,30 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         # 🚨 Si todos los intentos fallaron, crear fallback mínimo
         if last_error is not None and 'optimization_result' not in locals():
-            logger.error(f"Optimización falló después de {max_retries} intentos: {last_error}")
+            error_reason = f"{type(last_error).__name__}: {str(last_error)}"
+            logger.error(f"💥 Optimización falló después de {max_retries} intentos: {error_reason}")
             
-            # Respuesta de fallback básica
+            # Respuesta de fallback básica MEJORADA - Sin duplicados
             fallback_days = {}
             day_count = (end_date - start_date).days + 1
+            places_per_day = len(normalized_places) // day_count if day_count > 0 else len(normalized_places)
+            remaining_places = len(normalized_places) % day_count if day_count > 0 else 0
+            
+            current_place_index = 0
             
             for i in range(day_count):
-                date_key = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
+                current_date = start_date + timedelta(days=i)
+                date_key = current_date.strftime('%Y-%m-%d')
+                
+                # Distribuir lugares equitativamente
+                places_this_day = places_per_day + (1 if i < remaining_places else 0)
+                day_places = normalized_places[current_place_index:current_place_index + places_this_day]
+                current_place_index += places_this_day
+                
                 fallback_days[date_key] = {
-                    "activities": normalized_places[:min(3, len(normalized_places))],  # Max 3 por día
+                    "day": i + 1,
+                    "date": date_key,
+                    "activities": day_places,
                     "transfers": [],
                     "free_blocks": [],
                     "actionable_recommendations": [
@@ -297,11 +328,11 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                             "type": "system_error",
                             "priority": "high",
                             "title": "Optimización temporal no disponible",
-                            "description": "Usando itinerario básico. Intenta nuevamente.",
+                            "description": f"Error: {error_reason}. Usando itinerario básico.",
                             "action": "retry_optimization"
                         }
                     ],
-                    "base": None,
+                    "base": day_places[0] if day_places else None,  # Primer lugar del día como base
                     "travel_summary": {
                         "total_travel_time_s": 0,
                         "walking_time_minutes": 0,
@@ -310,20 +341,21 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 }
             
             return ItineraryResponse(
-                days=fallback_days,
-                summary={
+                itinerary=list(fallback_days.values()),
+                optimization_metrics={
                     "total_places": len(normalized_places),
                     "total_days": day_count,
                     "optimization_mode": "fallback_basic",
-                    "error": "Sistema temporalmente no disponible",
-                    "fallback_active": True
-                },
-                meta={
-                    "version": "V3.1_Enhanced_Fallback",
-                    "retry_attempts": max_retries,
-                    "error_occurred": True,
+                    "error": error_reason,  # ← Propagamos error_reason aquí
+                    "fallback_active": True,
+                    "efficiency_score": 0.3,
                     "processing_time_seconds": time_module.time() - start_time
-                }
+                },
+                recommendations=[
+                    f"Sistema en modo fallback - Error: {error_reason}",
+                    "Intente nuevamente en unos momentos",
+                    "Contacte soporte si el problema persiste"
+                ]
             )
         
         # Extraer datos del resultado de optimización
@@ -407,7 +439,28 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     f"🏨 {clusters_info['recommended_hotels']} hotel(es) recomendado(s) automáticamente como base"
                 )
         else:
-            base_recommendations.append("✅ Todos los lugares están en la misma zona geográfica")
+            # 🔍 CÁLCULO DINÁMICO DE ZONAS GEOGRÁFICAS
+            unique_bases = set()
+            intercity_transfers = []
+            
+            for day in days_data:
+                base = day.get('base')
+                if base and base.get('name'):
+                    unique_bases.add(base['name'])
+                
+                # Recopilar transfers intercity
+                for transfer in day.get('transfers', []):
+                    if transfer.get('type') == 'intercity_transfer':
+                        intercity_transfers.append(f"{transfer['from']} → {transfer['to']} ({transfer.get('mode', 'drive')})")
+            
+            unique_clusters = len(unique_bases)
+            
+            if unique_clusters <= 1:
+                base_recommendations.append("✅ Todos los lugares están en la misma zona geográfica")
+            else:
+                base_recommendations.append(f"🏨 {unique_clusters} zonas geográficas identificadas")
+                if intercity_transfers:
+                    base_recommendations.append(f"🚗 Transfers: {', '.join(intercity_transfers)}")
         
         # Formatear respuesta para frontend simplificada
         def format_activity_for_frontend(activity, order):
@@ -505,12 +558,25 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             day_counter += 1
         
         # Estructura final para frontend
+        # 📊 MÉTRICAS COMPLETAS del optimizer (incluyendo optimization_mode, fallback_active, etc.)
+        optimizer_metrics = optimization_result.get("optimization_metrics", {})
+        
+        # 🕐 Calcular duración del procesamiento
+        duration = time_module.time() - start_time
+        
         formatted_result = {
             "itinerary": itinerary_days,
             "optimization_metrics": {
-                "efficiency_score": optimization_result.get("optimization_metrics", {}).get("efficiency_score", 0.9),
-                "total_distance_km": optimization_result.get("optimization_metrics", {}).get("total_distance_km", 0),
-                "total_travel_time_minutes": int(total_travel_minutes)
+                # Métricas del optimizer (incluye optimization_mode, fallback_active, intercity_transfers, etc.)
+                **optimizer_metrics,
+                # Métricas adicionales calculadas en el API
+                "total_distance_km": optimizer_metrics.get("total_distance_km", 0),
+                "total_travel_time_minutes": int(total_travel_minutes),
+                "processing_time_seconds": round(duration, 2),
+                "hotels_provided": hotels_provided,
+                "hotels_count": len(accommodations_data) if accommodations_data else 0,
+                # Override el optimization_mode si se usaron hoteles
+                "optimization_mode": "hotel_centroid" if hotels_provided else optimizer_metrics.get("optimization_mode", "geographic_v31")
             },
             "recommendations": base_recommendations
         }
@@ -560,7 +626,6 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         free_days_detected = empty_days + partial_free_days
         
         # Log success
-        duration = time_module.time() - start_time
         analytics.track_request(f"hybrid_itinerary_{optimization_mode}_success", {
             "efficiency_score": optimization_result.get("optimization_metrics", {}).get("efficiency_score", 0.9),
             "total_activities": total_activities,
