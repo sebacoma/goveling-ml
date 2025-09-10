@@ -15,16 +15,38 @@ class TransportMode(str, Enum):
     BIKE = "bike"
 
 class PlaceType(str, Enum):
+    # Tipos básicos
+    RESTAURANT = "restaurant"
+    CAFE = "cafe"
+    BAR = "bar"
+    
+    # Atracciones y puntos de interés
+    ATTRACTION = "attraction"
     MUSEUM = "museum"
     PARK = "park"
-    RESTAURANT = "restaurant"
     CHURCH = "church"
-    MALL = "shopping_mall"
-    BEACH = "beach"
-    VIEWPOINT = "viewpoint"
     MONUMENT = "monument"
-    CAFE = "cafe"
+    VIEWPOINT = "viewpoint"
+    BEACH = "beach"
     ZOO = "zoo"
+    
+    # Shopping y entretenimiento
+    SHOPPING = "shopping"
+    SHOPPING_MALL = "shopping_mall"
+    STORE = "store"
+    NIGHT_CLUB = "night_club"
+    MOVIE_THEATER = "movie_theater"
+    
+    # Lugares al aire libre
+    NATURAL_FEATURE = "natural_feature"
+    POINT_OF_INTEREST = "point_of_interest"
+    
+    # Otros tipos comunes de Google Places
+    LODGING = "lodging"
+    FOOD = "food"
+    ESTABLISHMENT = "establishment"
+    ART_GALLERY = "art_gallery"
+    TOURIST_ATTRACTION = "tourist_attraction"
 
 class Place(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
