@@ -154,7 +154,7 @@ class Place(BaseModel):
         return self.type.value if self.type is not None else (self.category.value if self.category is not None else None)
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True
 
 class Activity(BaseModel):
     place: str
@@ -209,20 +209,9 @@ class ItineraryRequest(BaseModel):
         extra = "ignore"
 
 class ItineraryResponse(BaseModel):
-    days: List[Dict]
-    unassigned: List[Dict] = []
-    total_activities: int
-    total_travel_time_minutes: float
-    average_activities_per_day: float
-    generated_at: str
-    model_version: str
+    itinerary: List[Dict]
     optimization_metrics: Dict
     recommendations: List[str]
-    system_info: Dict
-    ml_recommendations: Optional[List[Dict]] = None
-    suggested_accommodations: Optional[List[Dict]] = None
-    free_days_analysis: Optional[Dict] = None
-    free_day_suggestions: Optional[List[Dict]] = None
 
 class HotelRecommendationRequest(BaseModel):
     places: List[Place]
