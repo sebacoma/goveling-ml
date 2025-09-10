@@ -26,16 +26,17 @@ class HotelRecommender:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         
-        # Base de datos de hoteles en Santiago (se puede expandir)
-        self.santiago_hotels = [
-            {
-                "name": "Hotel Sheraton Santiago",
-                "lat": -33.4172,
-                "lon": -70.6060,
-                "address": "Av. Santa María 1742, Providencia",
-                "rating": 4.6,
-                "price_range": "high"
-            },
+        # Base de datos de hoteles por ciudad
+        self.hotel_database = {
+            "santiago": [
+                {
+                    "name": "Hotel Sheraton Santiago",
+                    "lat": -33.4172,
+                    "lon": -70.6060,
+                    "address": "Av. Santa María 1742, Providencia",
+                    "rating": 4.6,
+                    "price_range": "high"
+                },
             {
                 "name": "W Santiago",
                 "lat": -33.4150,
@@ -108,7 +109,52 @@ class HotelRecommender:
                 "rating": 4.2,
                 "price_range": "medium"
             }
+        ],
+        "antofagasta": [
+            {
+                "name": "Hotel Terrado Antofagasta",
+                "lat": -23.646929,
+                "lon": -70.4031467,
+                "address": "Avenida Balmaceda 2575, Antofagasta",
+                "rating": 4.5,
+                "price_range": "high"
+            },
+            {
+                "name": "Hotel Antofagasta",
+                "lat": -23.6500,
+                "lon": -70.3977,
+                "address": "Av. Grecia 1490, Antofagasta",
+                "rating": 4.3,
+                "price_range": "medium"
+            },
+            {
+                "name": "Ibis Antofagasta",
+                "lat": -23.6435,
+                "lon": -70.3955,
+                "address": "Av. Grecia 1171, Antofagasta",
+                "rating": 4.0,
+                "price_range": "low"
+            }
+        ],
+        "calama": [
+            {
+                "name": "Hotel Diego de Almagro Calama",
+                "lat": -22.4583,
+                "lon": -68.9204,
+                "address": "Av. Granaderos 3452, Calama",
+                "rating": 4.2,
+                "price_range": "medium"
+            },
+            {
+                "name": "Park Plaza Calama",
+                "lat": -22.4595,
+                "lon": -68.9215,
+                "address": "Av. Balmaceda 2634, Calama",
+                "rating": 4.1,
+                "price_range": "medium"
+            }
         ]
+    }
     
     def haversine_km(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calcular distancia usando fórmula de Haversine"""
@@ -186,6 +232,15 @@ class HotelRecommender:
         
         return min(1.0, final_score)
     
+    def determine_city(self, lat: float) -> str:
+        """Determinar ciudad basado en la latitud"""
+        if -23.7 <= lat <= -23.5:  # Antofagasta
+            return "antofagasta"
+        elif -22.5 <= lat <= -22.4:  # Calama
+            return "calama"
+        else:  # Default a Santiago
+            return "santiago"
+    
     def recommend_hotels(self, places: List[Dict], max_recommendations: int = 5, 
                         price_preference: str = "any") -> List[HotelRecommendation]:
         """
@@ -203,10 +258,13 @@ class HotelRecommender:
         # Calcular centroide geográfico
         centroid = self.calculate_geographic_centroid(places)
         
+        # Determinar ciudad basado en el centroide
+        city = self.determine_city(centroid[0])
+        
         # Filtrar hoteles por preferencia de precio
-        available_hotels = self.santiago_hotels
+        available_hotels = self.hotel_database[city]
         if price_preference != "any":
-            available_hotels = [h for h in self.santiago_hotels if h['price_range'] == price_preference]
+            available_hotels = [h for h in available_hotels if h['price_range'] == price_preference]
         
         # Calcular scores para cada hotel
         recommendations = []

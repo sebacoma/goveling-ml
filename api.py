@@ -8,9 +8,10 @@ import logging
 from datetime import datetime, time as dt_time
 import time as time_module
 
-from models.schemas_new import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
+from models.schemas import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
 from settings import settings
 from services.hotel_recommender import HotelRecommender
+from services.google_places_service import GooglePlacesService
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -185,15 +186,15 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             ])
         else:
             base_recommendations.extend([
-                "🗺️ Itinerario optimizado con clustering geográfico automático",
-                "📊 Agrupación inteligente por proximidad geográfica"
+                "Itinerario optimizado con clustering geográfico automático",
+                "Agrupación inteligente por proximidad geográfica"
             ])
             
         base_recommendations.extend([
-            f"⚡ Método híbrido: Haversine + Google Directions API",
-            f"📅 {total_activities} actividades distribuidas en {len(days_data)} días",
-            f"🎯 Score de eficiencia: {optimization_result.get('optimization_metrics', {}).get('efficiency_score', 0.9):.1%}",
-            f"🚶‍♂️ Tiempo total de viaje: {int(total_travel_minutes)} minutos"
+            f"Método híbrido: Haversine + Google Directions API",
+            f"{total_activities} actividades distribuidas en {len(days_data)} días",
+            f"Score de eficiencia: {optimization_result.get('optimization_metrics', {}).get('efficiency_score', 0.9):.1%}",
+            f"Tiempo total de viaje: {int(total_travel_minutes)} minutos"
         ])
         
         # Formatear respuesta para ItineraryResponse con información completa
@@ -290,7 +291,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         # Si hay días con espacio libre, generar recomendaciones
         if free_days_detected:
             try:
-                from services.recommendation_engine import RecommendationEngine
+                from services.recommendation_service import RecommendationService
                 
                 # Crear actividades del usuario para el análisis ML
                 user_activities = []
@@ -318,7 +319,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 
                 # Generar recomendaciones si tenemos suficientes datos
                 if len(user_activities) >= 2:
-                    recommendation_engine = RecommendationEngine()
+                    recommendation_service = RecommendationService()
                     
                     # Calcular ubicación central del usuario
                     avg_lat = sum(act.coordinates.latitude for act in user_activities) / len(user_activities)
@@ -326,7 +327,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     user_location = {"latitude": avg_lat, "longitude": avg_lon}
                     
                     # Generar recomendaciones
-                    ml_recommendations = recommendation_engine.generate_recommendations(
+                    ml_recommendations = await recommendation_service.generate_recommendations(
                         user_activities=user_activities,
                         free_days=len(free_days_detected),
                         user_location=user_location,
@@ -393,103 +394,316 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         else:
             logging.warning(f"⚠️ No hay recomendaciones para añadir a la respuesta")
         
-        # 🗓️ GENERAR SUGERENCIAS ESPECÍFICAS PARA DÍAS LIBRES
+        # 🗓️ GENERAR SUGERENCIAS ESPECÍFICAS PARA DÍAS LIBRES (dinámico, sin ciudades hardcodeadas)
         if empty_days:
             logging.info(f"🗓️ Detectados {len(empty_days)} días completamente libres")
-            
-            # Sugerencias categorizadas por tipo de día libre
-            for empty_day in empty_days:
-                day_suggestions = [
-                    {
-                        "type": "day_trip_suggestion",
-                        "category": "nature_escape",
-                        "title": f"Escape a la Naturaleza - {empty_day['date']}",
-                        "suggestions": [
-                            "🏔️ Excursión a Cajón del Maipo y Embalse El Yeso",
-                            "🍷 Tour de viñas en Casablanca o Maipo Alto", 
-                            "🏔️ Teleférico y senderismo en Cerro San Cristóbal",
-                            "🌊 Excursión a Valparaíso y Viña del Mar (día completo)"
-                        ],
-                        "duration": "8-10 horas",
-                        "transport": "Auto recomendado o tour organizado"
-                    },
-                    {
-                        "type": "day_trip_suggestion", 
-                        "category": "cultural_immersion",
-                        "title": f"Inmersión Cultural - {empty_day['date']}",
-                        "suggestions": [
-                            "🎨 Recorrido completo por museos: MNBA + MAC + Bellas Artes",
-                            "🏛️ Tour arquitectónico: Centro Histórico + Barrio Yungay",
-                            "🛍️ Experiencia gastronómica: Mercados + Barrio Italia",
-                            "📚 Ruta literaria: Casa de Neruda + Biblioteca Nacional"
-                        ],
-                        "duration": "6-8 horas",
-                        "transport": "🚶 A pie + Metro"
-                    },
-                    {
-                        "type": "day_trip_suggestion",
-                        "category": "adventure_day", 
-                        "title": f"Día de Aventura - {empty_day['date']}",
-                        "suggestions": [
-                            "🎿 Sky Costanera + Parque Arauco (shopping y panorámica)",
-                            "🚴 Cicletada por Providencia + Parque Bicentenario",
-                            "🎢 Fantasilandia (parque de diversiones)",
-                            "🦁 Zoológico Nacional + Parque Metropolitano completo"
-                        ],
-                        "duration": "6-8 horas", 
-                        "transport": "🚌 Transporte público"
-                    }
-                ]
-                
-                # Añadir sugerencias específicas al día
-                formatted_result.setdefault("free_day_suggestions", []).extend(day_suggestions)
-            
-            # Añadir resumen en recommendations generales
-            formatted_result["recommendations"].extend([
-                f"🗓️ {len(empty_days)} día(s) completamente libre(s) detectado(s)",
-                "💡 Sugerencias de día completo disponibles en 'free_day_suggestions'",
-                "🎯 Considera tours de día completo o excursiones fuera de Santiago"
-            ])
-            
-            logging.info(f"🗓️ Generadas sugerencias para {len(empty_days)} días libres")
-        
-        # 🏨 RECOMENDACIONES DE HOTELES AUTOMÁTICAS (si no se proporcionaron accommodations)
-        if not hotels_provided and places_data:
-            try:
-                hotel_recommender = HotelRecommender()
-                hotel_recommendations = hotel_recommender.recommend_hotels(
-                    places_data, 
-                    max_recommendations=3,  # Top 3 hoteles
-                    price_preference="any"
-                )
-                
-                if hotel_recommendations:
-                    formatted_result["suggested_accommodations"] = hotel_recommender.format_recommendations_for_api(hotel_recommendations)
-                    
-                    # 🏨 MEJORAR EL LODGING CON LA MEJOR RECOMENDACIÓN
-                    best_hotel = hotel_recommendations[0]
-                    for day in formatted_result["days"]:
-                        day["lodging"] = {
-                            "name": best_hotel.name,
-                            "lat": best_hotel.lat,
-                            "lon": best_hotel.lon,
-                            "address": best_hotel.address,
-                            "rating": best_hotel.rating,
-                            "price_range": best_hotel.price_range,
-                            "convenience_score": best_hotel.convenience_score,
-                            "type": "recommended_hotel"
-                        }
-                    
-                    # Añadir mensaje en recomendaciones generales
-                    formatted_result["recommendations"].append(
-                        f"🏨 Mejor alojamiento recomendado: {best_hotel.name} (score: {best_hotel.convenience_score:.2f})"
+
+            # 1) Determinar un centro (lat, lon) para buscar alrededor
+            def _first_valid_coord():
+                # usa lodging si existe, luego primera actividad, luego primer place
+                for day in formatted_result.get("days", []):
+                    if isinstance(day, dict) and day.get("lodging") and all(k in day["lodging"] for k in ("lat", "lon")):
+                        return day["lodging"]["lat"], day["lodging"]["lon"]
+                for day in formatted_result.get("days", []):
+                    for act in day.get("activities", []):
+                        if "lat" in act and "lon" in act:
+                            return act["lat"], act["lon"]
+                for p in places_data:
+                    if p.get("lat") is not None and p.get("lon") is not None:
+                        return p["lat"], p["lon"]
+                return None, None
+
+            activities_lat, activities_lon = [], []
+            for day in formatted_result.get("days", []):
+                for act in day.get("activities", []):
+                    if "lat" in act and "lon" in act:
+                        activities_lat.append(act["lat"])
+                        activities_lon.append(act["lon"])
+
+            if activities_lat and activities_lon:
+                centroid_lat = sum(activities_lat) / len(activities_lat)
+                centroid_lon = sum(activities_lon) / len(activities_lon)
+            else:
+                centroid_lat, centroid_lon = _first_valid_coord()
+
+            if centroid_lat is None or centroid_lon is None:
+                logging.warning("⚠️ No hay coordenadas para sugerencias dinámicas; se omite generación de free_day_suggestions.")
+            else:
+                # 2) Consultar sugerencias dinámicas alrededor del centro
+                places_service = GooglePlacesService()
+                try:
+                    # Puedes ajustar radius_m y limit_per_category según tu UX
+                    dynamic = places_service.generate_day_suggestions(
+                        lat=centroid_lat,
+                        lon=centroid_lon,
+                        # categories=None -> usa las default del servicio (nature, culture, food, etc.)
+                        radius_m=3000,
+                        limit_per_category=6,
                     )
-                    
-                    logging.info(f"🏨 {len(hotel_recommendations)} recomendaciones de hoteles añadidas automáticamente")
-                    
-            except Exception as e:
-                logging.warning(f"⚠️ No se pudieron generar recomendaciones de hoteles automáticas: {e}")
+                    categories = dynamic.get("categories", {})
+                    # Orden sugerido de categorías (si existen)
+                    category_order = ["nature", "culture", "food", "shopping", "family", "viewpoints", "nightlife"]
+                    ordered_categories = [c for c in category_order if c in categories] or list(categories.keys())
+
+                    # 3) Armar payload de sugerencias por día libre (sin hardcodear por ciudad)
+                    def build_day_suggestions(date_str: str) -> dict:
+                        items = []
+                        for cat in ordered_categories:
+                            for poi in categories.get(cat, [])[:3]:  # toma top 3 por categoría
+                                items.append({
+                                    "category": cat,
+                                    "name": poi.get("name"),
+                                    "address": poi.get("address"),
+                                    "lat": poi.get("lat"),
+                                    "lon": poi.get("lon"),
+                                    "rating": poi.get("rating"),
+                                    "user_ratings_total": poi.get("user_ratings_total"),
+                                    "distance_km": poi.get("distance_km"),
+                                    "open_now": poi.get("open_now"),
+                                    "source": poi.get("source"),
+                                    "score": poi.get("score")
+                                })
+                        # Ordena por score (desc), luego distancia (asc)
+                        items.sort(key=lambda x: (-float(x.get("score") or 0), float(x.get("distance_km") or 1e9)))
+                        # Limita a 12 para no saturar
+                        items = items[:12]
+
+                        return {
+                            "type": "free_day",
+                            "date": date_str,
+                            "title": f"Día libre - {date_str}",
+                            "origin": {"latitude": centroid_lat, "longitude": centroid_lon},
+                            "suggestions": items,
+                            "note": "Sugerencias cercanas generadas dinámicamente a partir de datos externos (Google/OSM)."
+                        }
+
+                    for empty_day in empty_days:
+                        formatted_result.setdefault("free_day_suggestions", []).append(
+                            build_day_suggestions(empty_day["date"])
+                        )
+
+                    formatted_result["recommendations"].extend([
+                        f"{len(empty_days)} día(s) completamente libre(s) detectado(s)",
+                        "Se generaron sugerencias cercanas en 'free_day_suggestions' basadas en datos alrededor del centro del itinerario."
+                    ])
+                    logging.info(f"🗓️ Generadas sugerencias dinámicas para {len(empty_days)} días libres")
+                except Exception as e:
+                    logging.warning(f"⚠️ Error generando sugerencias dinámicas: {e}")
+                    # Fallback ultra simple (sin ciudades ni strings específicos)
+                    for empty_day in empty_days:
+                        formatted_result.setdefault("free_day_suggestions", []).append({
+                            "type": "free_day",
+                            "date": empty_day["date"],
+                            "title": f"Día libre - {empty_day['date']}",
+                            "origin": {"latitude": centroid_lat, "longitude": centroid_lon},
+                            "suggestions": [],
+                            "note": "No fue posible obtener sugerencias dinámicas en este momento."
+                        })
         
+        # RECOMENDACIONES DE HOTELES AUTOMÁTICAS (si no se proporcionaron accommodations)
+            logging.info(f"🗓️ Detectados {len(empty_days)} días completamente libres")
+            
+            # Determinar la ciudad basada en el centroide de actividades
+            activities_lat = []
+            activities_lon = []
+            for day in formatted_result["days"]:
+                for activity in day.get("activities", []):
+                    activities_lat.append(activity["lat"])
+                    activities_lon.append(activity["lon"])
+            
+            # Calcular centroide y determinar la ciudad usando Google Places API
+            if activities_lat and activities_lon:
+                avg_lat = sum(activities_lat) / len(activities_lat)
+                avg_lon = sum(activities_lon) / len(activities_lon)
+                
+                try:
+                    from utils.google_maps_client import GoogleMapsClient
+                    maps_client = GoogleMapsClient()
+                    
+                    # Usar reverse geocoding para obtener información de la ubicación
+                    location_info = maps_client.reverse_geocode(avg_lat, avg_lon)
+                    
+                    # Extraer ciudad y país de los resultados
+                    city = maps_client.extract_city_from_geocoding(location_info)
+                    country = maps_client.extract_country_from_geocoding(location_info)
+                    
+                    logging.info(f"Ciudad detectada mediante Google Maps API: {city}, {country}")
+                except Exception as e:
+                    logging.warning(f"No se pudo determinar la ciudad mediante Google Maps API: {e}")
+                    # Determinar ciudad basado en las coordenadas promedio
+                    if avg_lat and avg_lon:
+                        if -23.7 <= avg_lat <= -23.5:  # Antofagasta
+                            city = "antofagasta"
+                        elif -22.5 <= avg_lat <= -22.3:  # Calama
+                            city = "calama"
+                        else:  # Santiago u otra zona central por defecto
+                            city = "santiago"
+                    else:
+                        city = "santiago"  # Ciudad por defecto
+            else:
+                # Si no hay actividades, usar coordenadas del hotel o lodging si existe
+                lodging_found = False
+                for day in formatted_result["days"]:
+                    if "lodging" in day and "lat" in day["lodging"] and "lon" in day["lodging"]:
+                        try:
+                            from utils.google_maps_client import GoogleMapsClient
+                            maps_client = GoogleMapsClient()
+                            
+                            # Usar reverse geocoding para el lodging
+                            location_info = maps_client.reverse_geocode(
+                                day["lodging"]["lat"], 
+                                day["lodging"]["lon"]
+                            )
+                            
+                            # Extraer ciudad del lodging
+                            city = maps_client.extract_city_from_geocoding(location_info)
+                            lodging_found = True
+                            break
+                        except Exception as e:
+                            logging.warning(f"No se pudo determinar la ciudad del lodging: {e}")
+                            continue
+                
+                if not lodging_found:
+                    # Si no se pudo determinar la ciudad, intentar usar el nombre del lodging
+                    if "lodging" in day and "name" in day["lodging"]:
+                        city = day["lodging"]["name"].split(',')[0].strip().lower()
+                    else:
+                        city = "unknown"
+            
+            logging.info(f"🗓️ Detectados {len(empty_days)} días completamente libres")
+            
+            # Marcar días libres detectados
+            for empty_day in empty_days:
+                free_day_info = {
+                    "type": "free_day",
+                    "date": empty_day['date'],
+                    "title": f"Día Libre - {empty_day['date']}",
+                    "description": "Día disponible para actividades adicionales o descanso",
+                    "suggestions": [
+                        "💡 Explora lugares locales de interés",
+                        "🍽️ Prueba la gastronomía local",
+                        "🛍️ Visita mercados o centros comerciales",
+                        "🚶 Camina por el centro de la ciudad",
+                        "☕ Relájate en cafeterías locales"
+                    ]
+                }
+                
+                # Agregar información del día libre
+                formatted_result.setdefault("free_day_suggestions", []).append(free_day_info)
+            
+            # Añadir resumen en recommendations generales si hay días libres
+            if empty_days:
+                formatted_result["recommendations"].extend([
+                    f"{len(empty_days)} día(s) completamente libre(s) detectado(s)",
+                    "Considera actividades locales o tiempo de descanso"
+                ])
+                
+                logging.info(f"🗓️ Generadas sugerencias para {len(empty_days)} días libres")
+        
+            # RECOMENDACIONES DE HOTELES AUTOMÁTICAS (si no se proporcionaron accommodations)
+            if not hotels_provided and places_data:
+                try:
+                    # Determinar la ciudad basada en las actividades
+                    activities_lat = [p.get('lat', None) for p in places_data if p.get('lat') is not None]
+                    activities_lon = [p.get('lon', None) for p in places_data if p.get('lon') is not None]
+                    
+                    if activities_lat and activities_lon:
+                        avg_lat = sum(activities_lat) / len(activities_lat)
+                        avg_lon = sum(activities_lon) / len(activities_lon)
+                        
+                        try:
+                            # Inicializar recomendador con la ciudad correcta
+                            hotel_recommender = HotelRecommender()
+                            hotel_recommendations = hotel_recommender.recommend_hotels(
+                                places_data, 
+                                max_recommendations=3,  # Top 3 hoteles
+                                price_preference="any",
+                                city_coords={'lat': avg_lat, 'lon': avg_lon}  # Pasar coordenadas de la ciudad
+                            )
+                            
+                            if hotel_recommendations:
+                                activity_center = {
+                                    'lat': avg_lat,
+                                    'lon': avg_lon
+                                }
+                                
+                                # Calcular radio de búsqueda basado en la dispersión de las actividades
+                                from math import sqrt
+                                std_lat = sqrt(sum((lat - activity_center['lat'])**2 for lat in activities_lat) / len(activities_lat))
+                                std_lon = sqrt(sum((lon - activity_center['lon'])**2 for lon in activities_lon) / len(activities_lon))
+                                search_radius = max(std_lat, std_lon) * 2  # Radio adaptativo basado en la dispersión
+                                
+                                def distance_to_center(hotel):
+                                    return sqrt((hotel.lat - activity_center['lat'])**2 + (hotel.lon - activity_center['lon'])**2)
+                                
+                                # Filtrar hoteles dentro del radio adaptativo
+                                city_hotels = [h for h in hotel_recommendations if distance_to_center(h) < search_radius]
+                                
+                                if city_hotels:
+                                    formatted_result["suggested_accommodations"] = hotel_recommender.format_recommendations_for_api(city_hotels[:3])
+                                    best_hotel = city_hotels[0]
+                                    formatted_result["recommendations"].append(
+                                        f"Mejor alojamiento recomendado: {best_hotel.name} (score: {best_hotel.convenience_score:.2f})"
+                                    )
+                        except Exception as e:
+                            logging.warning(f"Error al recomendar hoteles: {str(e)}")
+                            
+                                                        # Si falló la recomendación, intentar mejorar el lodging con recomendaciones por ciudad
+                            try:
+                                # Determinar ciudad del día basado en sus actividades (simple heurística por latitud)
+                                city = "santiago"  # valor por defecto
+                                first_day_with_activities_idx = None
+
+                                for idx, day in enumerate(formatted_result.get("days", [])):
+                                    day_activities = day.get("activities", [])
+                                    if day_activities and first_day_with_activities_idx is None:
+                                        first_day_with_activities_idx = idx
+
+                                    if day_activities:
+                                        day_lat = sum(act["lat"] for act in day_activities) / len(day_activities)
+                                        if -23.7 <= day_lat <= -23.5:      # Antofagasta
+                                            city = "antofagasta"
+                                        elif -22.5 <= day_lat <= -22.3:    # Calama
+                                            city = "calama"
+                                        else:                               # Santiago (u otra zona central)
+                                            city = "santiago"
+
+                                # Solo continúa si tenemos una lista de hoteles para filtrar
+                                if hotel_recommendations:
+                                    city_hotels = [
+                                        h for h in hotel_recommendations if (
+                                            (-23.7 <= h.lat <= -23.5 and -70.5 <= h.lon <= -70.3 and city == "antofagasta") or
+                                            (-22.5 <= h.lat <= -22.3 and -69.0 <= h.lon <= -68.8 and city == "calama") or
+                                            (-33.5 <= h.lat <= -33.3 and -70.7 <= h.lon <= -70.5 and city == "santiago")
+                                        )
+                                    ]
+
+                                    if city_hotels:
+                                        best_hotel = city_hotels[0]
+
+                                        # Asignar lodging al primer día con actividades (si existe), para no usar una variable 'day' fuera de su bucle
+                                        if first_day_with_activities_idx is not None:
+                                            target_day = formatted_result["days"][first_day_with_activities_idx]
+                                            target_day["lodging"] = {
+                                                "name": best_hotel.name,
+                                                "lat": best_hotel.lat,
+                                                "lon": best_hotel.lon,
+                                                "address": best_hotel.address,
+                                                "rating": best_hotel.rating,
+                                                "price_range": best_hotel.price_range,
+                                                "convenience_score": best_hotel.convenience_score,
+                                                "type": "recommended_hotel"
+                                            }
+
+                                        # Mensaje de recomendación global
+                                        formatted_result["recommendations"].append(
+                                            f"Mejor alojamiento recomendado: {best_hotel.name} (score: {best_hotel.convenience_score:.2f})"
+                                        )
+                                        logging.info("Hotel recommendations añadidas automáticamente")
+                            except Exception as e:
+                                logging.warning(f"⚠️ No se pudieron procesar las recomendaciones de hoteles por ciudad: {e}")
+                except Exception as e:
+                    logging.warning(f"Error procesando coordenadas de actividades: {str(e)}")
         # Log success
         duration = time_module.time() - start_time
         analytics.track_request(f"hybrid_itinerary_{optimization_mode}_success", {
@@ -613,6 +827,52 @@ async def recommend_hotels_endpoint(request: HotelRecommendationRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Error generating hotel recommendations: {str(e)}"
+        )
+
+@app.post("/api/v2/places/suggest")
+async def suggest_places_endpoint(coords: Coordinates):
+    """
+    🌍 Sugerir lugares para visitar cerca de una ubicación
+    
+    Analiza la ubicación proporcionada y sugiere lugares interesantes 
+    cercanos, categorizados por tipo de actividad.
+    """
+    try:
+        start_time = time_module.time()
+        
+        # Inicializar servicio de Google Places
+        places_service = GooglePlacesService()
+        
+        # Generar sugerencias
+        suggestions = places_service.generate_day_suggestions(
+            lat=coords.latitude,
+            lon=coords.longitude
+        )
+        
+        # Métricas de rendimiento
+        duration = time_module.time() - start_time
+        
+        # Añadir métricas al resultado
+        suggestions["performance"] = {
+            "processing_time_s": round(duration, 2),
+            "generated_at": datetime.now().isoformat(),
+            "coordinates": {
+                "latitude": coords.latitude,
+                "longitude": coords.longitude
+            }
+        }
+        
+        logging.info(f"🌍 Sugerencias de lugares generadas en {duration:.2f}s")
+        
+        return suggestions
+        
+    except Exception as e:
+        logging.error(f"❌ Error generando sugerencias de lugares: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating place suggestions: {str(e)}"
         )
 
 if __name__ == "__main__":

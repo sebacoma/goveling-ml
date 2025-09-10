@@ -451,6 +451,79 @@ curl -X POST "http://localhost:8000/api/v2/hotels/recommend"
 
 **🔧 Built with FastAPI • 🤖 Powered by ML • 🗺️ Enhanced by Google Maps • 🏨 Optimized for Travel**
 
+### 🌍 **Sugerencias de Lugares**
+```
+POST /api/v2/places/suggest
+```
+
+**Request:**
+```json
+{
+  "latitude": -33.4372,
+  "longitude": -70.6506
+}
+```
+
+**Response:**
+```json
+{
+  "nature_escape": {
+    "suggestions": [
+      "🏔️ Cerro San Cristóbal",
+      "🌲 Parque Metropolitano",
+      "🌅 Parque Bicentenario",
+      "🌺 Jardín Botánico"
+    ],
+    "transport": "Transporte público o caminando",
+    "places": [
+      {
+        "name": "Cerro San Cristóbal",
+        "lat": -33.4251,
+        "lon": -70.6314,
+        "rating": 4.7,
+        "types": ["park", "natural_feature"]
+      }
+    ]
+  },
+  "cultural_immersion": {
+    "suggestions": [
+      "🎨 Museo Nacional de Bellas Artes",
+      "🏛️ Biblioteca Nacional",
+      "🎭 Centro Cultural La Moneda",
+      "🏺 Museo de Arte Precolombino"
+    ],
+    "transport": "A pie o bicicleta",
+    "places": [
+      {
+        "name": "Museo Nacional de Bellas Artes",
+        "lat": -33.4359,
+        "lon": -70.6451,
+        "rating": 4.5,
+        "types": ["museum", "art_gallery"]
+      }
+    ]
+  },
+  "adventure_day": {
+    "suggestions": [
+      "🎢 Fantasilandia",
+      "🏊 Piscina Olímpica",
+      "🚴 Ciclovía Providencia",
+      "🎯 Centro de Escalada"
+    ],
+    "transport": "A pie o transporte público",
+    "places": [
+      {
+        "name": "Fantasilandia",
+        "lat": -33.4666,
+        "lon": -70.6487,
+        "rating": 4.4,
+        "types": ["amusement_park"]
+      }
+    ]
+  }
+}
+```
+
 ### **3. Verificación**
 - ✅ Endpoint health: `/`
 - ✅ Documentación: `/docs`
