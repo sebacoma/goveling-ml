@@ -310,20 +310,21 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 }
             
             return ItineraryResponse(
-                days=fallback_days,
-                summary={
+                itinerary=list(fallback_days.values()),
+                optimization_metrics={
                     "total_places": len(normalized_places),
                     "total_days": day_count,
                     "optimization_mode": "fallback_basic",
                     "error": "Sistema temporalmente no disponible",
-                    "fallback_active": True
-                },
-                meta={
-                    "version": "V3.1_Enhanced_Fallback",
-                    "retry_attempts": max_retries,
-                    "error_occurred": True,
+                    "fallback_active": True,
+                    "efficiency_score": 0.5,
                     "processing_time_seconds": time_module.time() - start_time
-                }
+                },
+                recommendations=[
+                    "Sistema en modo fallback - funcionalidad limitada",
+                    "Intente nuevamente en unos momentos",
+                    "Contacte soporte si el problema persiste"
+                ]
             )
         
         # Extraer datos del resultado de optimización
@@ -525,7 +526,6 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         if days_with_activities < total_days_requested:
             # Generar fechas faltantes
-            from datetime import timedelta
             current_date = request.start_date
             existing_dates = {day["date"] for day in days_data}
             
@@ -580,6 +580,30 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         logging.info(f"🎯 Resultado: {total_activities} actividades, score {optimization_result.get('optimization_metrics', {}).get('efficiency_score', 0.9):.1%}")
         
         return ItineraryResponse(**formatted_result)
+        
+    except ValueError as ve:
+        # Handle geographic coherence errors specifically
+        if "Geographic coherence error" in str(ve):
+            analytics.track_error("geographic_coherence_error", str(ve), {
+                "places_count": len(request.places),
+                "error_type": "geographic_coherence"
+            })
+            logging.error(f"🌍 Geographic coherence error: {ve}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Geographic coherence error: {str(ve)}"
+            )
+        else:
+            # Other ValueError cases
+            analytics.track_error("validation_error", str(ve), {
+                "places_count": len(request.places),
+                "error_type": type(ve).__name__
+            })
+            logging.error(f"❌ Validation error: {ve}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Validation error: {str(ve)}"
+            )
         
     except Exception as e:
         # Log error

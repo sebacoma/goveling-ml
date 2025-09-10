@@ -76,10 +76,25 @@ class FreeBlock:
 
 class HybridOptimizerV31:
     def __init__(self):
-        self.google_service = GoogleDirectionsService()
+        self.logger = logging.getLogger('utils.hybrid_optimizer_v31')
+        self.google_directions_service = GoogleDirectionsService()
         self.hotel_recommender = HotelRecommender()
-        self.places_service = GooglePlacesService()
-        self.logger = logging.getLogger(__name__)
+        self.google_places_service = GooglePlacesService()
+        self._reset_context()
+    
+    def _reset_context(self):
+        """Reset completo de contexto para evitar fugas entre requests"""
+        self._last_valid_location = None
+        self._last_reference_place = None
+        self._last_base = None
+        self._overall_centroid = None
+        self._cluster_cache = {}
+        self.logger.debug("🔄 Contexto reseteado - sin residuos de requests previos")
+    
+    def _set_overall_centroid(self, centroid: Tuple[float, float]):
+        """Establece el centroide general del request"""
+        self._overall_centroid = {'lat': centroid[0], 'lon': centroid[1]}
+        self.logger.debug(f"🎯 Centroide general: ({centroid[0]:.4f}, {centroid[1]:.4f})")
         
     # =========================================================================
     # 1. CLUSTERING POIs (UNCHANGED FROM V3.0)
@@ -144,6 +159,53 @@ class HybridOptimizerV31:
         lons = [p['lon'] for p in places]
         return (sum(lats) / len(lats), sum(lons) / len(lons))
     
+    def _validate_base_coherence(self, base: Dict, cluster_centroid: Dict, 
+                                max_distance_km: float = 25.0) -> Dict:
+        """Valida que la base esté dentro del área coherente del cluster"""
+        
+        if not base or not cluster_centroid:
+            return base
+            
+        distance_km = haversine_km(
+            base['lat'], base['lon'],
+            cluster_centroid['lat'], cluster_centroid['lon']
+        )
+        
+        if distance_km > max_distance_km:
+            self.logger.warning(f"⚠️ Base fuera de cluster ({distance_km:.1f}km); reanclada al centroid del día")
+            
+            # Reanclar al centroide del cluster
+            return {
+                'name': "Centro del área",
+                'lat': cluster_centroid['lat'],
+                'lon': cluster_centroid['lon'],
+                'address': f"Reanclada por coherencia geográfica",
+                'rating': 0.0,
+                'type': 'virtual_base',
+                'reference_place': 'cluster_centroid_corrected'
+            }
+        
+        return base
+    
+    def _generate_synthetic_name(self, place_type: str) -> str:
+        """Genera nombres sintéticos coherentes sin referencias geográficas externas"""
+        
+        name_templates = {
+            'restaurant': ['Restaurante local', 'Comida tradicional', 'Bistro del área'],
+            'cafe': ['Café acogedor', 'Cafetería local', 'Café & Té'],
+            'tourist_attraction': ['Sitio histórico', 'Atracción local', 'Punto de interés'],
+            'point_of_interest': ['Lugar de interés', 'Sitio destacado', 'Punto relevante'],
+            'park': ['Parque urbano', 'Área verde', 'Espacio recreativo'],
+            'natural_feature': ['Lugar natural', 'Área paisajística', 'Sitio natural'],
+            'museum': ['Centro cultural', 'Museo local', 'Espacio cultural'],
+            'art_gallery': ['Galería de arte', 'Espacio artístico', 'Centro de arte'],
+            'bakery': ['Panadería local', 'Repostería', 'Panadería artesanal'],
+            'shopping_mall': ['Centro comercial', 'Plaza comercial', 'Mall local']
+        }
+        
+        templates = name_templates.get(place_type, ['Lugar de interés'])
+        return templates[hash(place_type) % len(templates)]
+    
     # =========================================================================
     # 2. ENHANCED HOME BASE ASSIGNMENT CON SUGERENCIAS
     # =========================================================================
@@ -156,16 +218,123 @@ class HybridOptimizerV31:
         """🏨 Asignar home_base y generar sugerencias de alojamiento"""
         self.logger.info(f"🏨 Asignando home_base a {len(clusters)} clusters")
         
-        if accommodations:
-            clusters = self._assign_user_hotels_to_clusters(clusters, accommodations)
-        else:
-            clusters = await self._recommend_hotels_for_clusters(clusters)
-        
-        # Generar sugerencias adicionales para cada cluster
         for cluster in clusters:
+            # Calcular centroide del cluster
+            cluster_centroid = {'lat': cluster.centroid[0], 'lon': cluster.centroid[1]}
+            
+            # Seleccionar base con validación de coherencia
+            cluster_base = self._select_home_base_enhanced(
+                cluster.places, cluster_centroid, accommodations
+            )
+            
+            # Validar coherencia geográfica
+            cluster_base = self._validate_base_coherence(cluster_base, cluster_centroid)
+            
+            if cluster_base:
+                cluster.home_base = cluster_base
+                cluster.home_base_source = cluster_base.get('type', 'unknown')
+                self.logger.info(f"  Cluster {cluster.label}: {cluster_base['name']} ({cluster_base['type']})")
+            
+            # Generar sugerencias adicionales para cada cluster
             await self._generate_accommodation_suggestions(cluster)
         
         return clusters
+    
+    def _select_home_base_enhanced(self, cluster_places: List[Dict], cluster_centroid: Dict = None, 
+                                 accommodations: List[Dict] = None) -> Dict:
+        """Selecciona home base inteligente con coherencia geográfica"""
+        
+        # Si no hay lugares en el cluster, usar centroide del cluster o general
+        if not cluster_places:
+            if cluster_centroid:
+                return {
+                    'name': "Centro del área",
+                    'lat': cluster_centroid['lat'],
+                    'lon': cluster_centroid['lon'],
+                    'address': f"Área centrada en ({cluster_centroid['lat']:.4f}, {cluster_centroid['lon']:.4f})",
+                    'rating': 0.0,
+                    'type': 'virtual_base',
+                    'reference_place': 'cluster_centroid'
+                }
+            elif self._overall_centroid:
+                return {
+                    'name': "Centro del itinerario",
+                    'lat': self._overall_centroid['lat'],
+                    'lon': self._overall_centroid['lon'],
+                    'address': f"Centro general del itinerario",
+                    'rating': 0.0,
+                    'type': 'virtual_base',
+                    'reference_place': 'overall_centroid'
+                }
+            else:
+                return None
+        
+        # Calcular centroide del cluster actual si no se proporcionó
+        if not cluster_centroid:
+            centroid_tuple = self._calculate_centroid(cluster_places)
+            cluster_centroid = {'lat': centroid_tuple[0], 'lon': centroid_tuple[1]}
+        
+        # 1. Prioridad: hotel del usuario en este cluster
+        if accommodations:
+            cluster_hotels = []
+            for hotel in accommodations:
+                distance_km = haversine_km(
+                    hotel['lat'], hotel['lon'], 
+                    cluster_centroid['lat'], cluster_centroid['lon']
+                )
+                if distance_km <= 5.0:  # Máximo 5km del cluster
+                    cluster_hotels.append((hotel, distance_km))
+            
+            if cluster_hotels:
+                closest_hotel = min(cluster_hotels, key=lambda x: x[1])[0]
+                return {
+                    'name': closest_hotel['name'],
+                    'lat': closest_hotel['lat'], 
+                    'lon': closest_hotel['lon'],
+                    'address': closest_hotel.get('address', ''),
+                    'rating': closest_hotel.get('rating', 0.0),
+                    'type': 'user_provided'
+                }
+        
+        # 2. Hubs de transporte (malls, estaciones)
+        transport_hubs = [p for p in cluster_places if p.get('type') in [
+            'shopping_mall', 'transit_station', 'bus_station', 'airport'
+        ]]
+        
+        if transport_hubs:
+            best_hub = max(transport_hubs, key=lambda h: h.get('rating', 0))
+            return {
+                'name': best_hub['name'],
+                'lat': best_hub['lat'],
+                'lon': best_hub['lon'], 
+                'address': best_hub.get('address', ''),
+                'rating': best_hub.get('rating', 0.0),
+                'type': 'transport_hub'
+            }
+            
+        # 3. Lugar mejor valorado del cluster
+        if cluster_places:
+            best_place = max(cluster_places, key=lambda p: p.get('rating', 0))
+            return {
+                'name': f"Centro de {best_place['name']}",
+                'lat': best_place['lat'],
+                'lon': best_place['lon'],
+                'address': f"Cerca de {best_place['name']}",
+                'rating': 0.0,
+                'type': 'smart_centroid',
+                'reference_place': best_place['name']
+            }
+            
+        # Fallback: centroide del cluster
+        return {
+            'name': "Centro del área",
+            'lat': cluster_centroid['lat'],
+            'lon': cluster_centroid['lon'],
+            'address': f"Centro geográfico del área",
+            'rating': 0.0,
+            'type': 'virtual_base',
+            'reference_place': 'cluster_centroid'
+        }
     
     def _assign_user_hotels_to_clusters(self, clusters: List[Cluster], accommodations: List[Dict]) -> List[Cluster]:
         """Asignar hoteles del usuario"""
@@ -242,11 +411,11 @@ class HybridOptimizerV31:
     
     def _set_fallback_base(self, cluster: Cluster):
         """Fallback mejorado: usar mejor lugar como base virtual"""
-        enhanced_base = self._select_home_base_enhanced(cluster)
+        enhanced_base = self._select_fallback_base_enhanced(cluster)
         cluster.home_base = enhanced_base
         cluster.home_base_source = "enhanced_fallback"
         
-    def _select_home_base_enhanced(self, cluster: Cluster) -> Dict:
+    def _select_fallback_base_enhanced(self, cluster: Cluster) -> Dict:
         """Seleccionar home base inteligente"""
         if not cluster.places:
             return {
@@ -596,9 +765,67 @@ class HybridOptimizerV31:
         transport_mode: str,
         previous_day_end_location: Optional[Tuple[float, float]] = None
     ) -> Dict:
-        """🗓️ Routing mejorado con transfers con nombres reales"""
+        """🗓️ Routing mejorado con coherencia geográfica para días vacíos"""
         self.logger.info(f"🗓️ Routing día {date} con {len(assigned_clusters)} clusters")
         
+        # Calcular centroide del día (de todos los clusters)
+        day_centroid = None
+        all_day_places = []
+        for cluster in assigned_clusters:
+            all_day_places.extend(cluster.places)
+        
+        if all_day_places:
+            centroid_tuple = self._calculate_centroid(all_day_places)
+            day_centroid = {'lat': centroid_tuple[0], 'lon': centroid_tuple[1]}
+        elif self._overall_centroid:
+            day_centroid = self._overall_centroid
+        
+        # Si no hay clusters para este día, crear día libre ANCLADO al centroide
+        if not assigned_clusters:
+            self.logger.info(f"� Día {date} sin clusters asignados - generando día libre")
+            
+            # Base virtual en el centroide general
+            virtual_base = None
+            if self._overall_centroid:
+                virtual_base = {
+                    'name': "Centro del itinerario",
+                    'lat': self._overall_centroid['lat'],
+                    'lon': self._overall_centroid['lon'],
+                    'address': "Base virtual para día libre",
+                    'rating': 0.0,
+                    'type': 'virtual_base',
+                    'reference_place': 'overall_centroid'
+                }
+            
+            # Generar bloque libre ANCLADO a la base virtual
+            start_minutes = daily_window.start
+            end_minutes = daily_window.end
+            duration_minutes = end_minutes - start_minutes
+            
+            free_block = await self._generate_free_blocks_enhanced(
+                start_minutes, end_minutes, duration_minutes, 
+                virtual_base, transport_mode  # ← Usar base virtual como origen
+            )
+            
+            return {
+                "date": date,
+                "activities": [],
+                "timeline": [],
+                "transfers": [],
+                "free_blocks": [free_block] if free_block else [],
+                "base": virtual_base,  # Base virtual coherente
+                "travel_summary": {
+                    "total_travel_time_s": 0,
+                    "total_distance_km": 0,
+                    "walking_time_minutes": 0,
+                    "transport_time_minutes": 0,
+                    "intercity_transfers_count": 0,
+                    "intercity_total_minutes": 0
+                },
+                "free_minutes": duration_minutes
+            }
+        
+        # Procesar clusters normales...
         timeline = []
         transfers = []
         activities_scheduled = []
@@ -613,7 +840,14 @@ class HybridOptimizerV31:
         intercity_total_minutes = 0
         total_distance = 0
         
+        # Variable para el home_base del día
+        day_base = None
+        
         for cluster in assigned_clusters:
+            # Usar home_base del cluster como base del día si no se ha establecido
+            if cluster.home_base and not day_base:
+                day_base = cluster.home_base
+            
             # Transfer inter-cluster con nombres reales + actividad intercity
             if current_location and cluster.home_base:
                 transfer = await self._build_enhanced_transfer(
@@ -689,10 +923,16 @@ class HybridOptimizerV31:
                     else:
                         transport_time += item.duration_minutes
         
-        # Generar free blocks con sugerencias mejoradas y recomendaciones procesables
-        free_blocks = await self._generate_free_blocks_enhanced(
-            current_time, daily_window.end, current_location
-        )
+        # Generar free blocks con sugerencias mejoradas ANCLADAS a day_base
+        free_blocks = []
+        if current_time < daily_window.end:
+            duration_minutes = daily_window.end - current_time
+            free_block = await self._generate_free_blocks_enhanced(
+                current_time, daily_window.end, duration_minutes, 
+                day_base, transport_mode  # ← Usar day_base como origen
+            )
+            if free_block:
+                free_blocks.append(free_block)
         
         # Generar recomendaciones procesables
         actionable_recommendations = self._generate_actionable_recommendations(
@@ -710,7 +950,7 @@ class HybridOptimizerV31:
             "transfers": transfers,
             "free_blocks": free_blocks,
             "actionable_recommendations": actionable_recommendations,
-            "base": assigned_clusters[0].home_base if assigned_clusters else None,
+            "base": day_base,  # Usar day_base calculado
             "travel_summary": {
                 "total_travel_time_s": total_travel_time * 60,
                 "total_distance_km": total_distance,
@@ -923,56 +1163,100 @@ class HybridOptimizerV31:
     
     async def _generate_free_blocks_enhanced(
         self,
-        current_time: int,
-        day_end: int,
-        location: Optional[Tuple[float, float]]
-    ) -> List[FreeBlock]:
-        """🆓 Generar bloques libres con sugerencias inteligentes por duración"""
-        free_blocks = []
+        start_minutes: int,
+        end_minutes: int,
+        duration_minutes: int,
+        day_base: Dict = None,
+        transport_mode: str = "walk"
+    ) -> Dict:
+        """Genera bloque libre mejorado ANCLADO a day.base"""
         
-        if current_time < day_end:
-            block_duration = day_end - current_time
+        # Usar SIEMPRE day.base como origen (coherencia garantizada)
+        if day_base:
+            origin_lat = day_base.get('lat', 0.0)
+            origin_lon = day_base.get('lon', 0.0)
+            self.logger.debug(f"🎯 Sugerencias ancladas a base: {day_base.get('name')} ({origin_lat:.4f}, {origin_lon:.4f})")
+        elif self._overall_centroid:
+            origin_lat = self._overall_centroid['lat']
+            origin_lon = self._overall_centroid['lon']
+            self.logger.debug(f"🎯 Sugerencias ancladas a centroide general: ({origin_lat:.4f}, {origin_lon:.4f})")
+        else:
+            # Sin origen válido - no generar sugerencias
+            self.logger.warning("⚠️ Sin origen válido para sugerencias")
+            return {
+                'start_time': start_minutes,
+                'end_time': end_minutes, 
+                'duration_minutes': duration_minutes,
+                'suggestions': [],
+                'note': f"Sin origen válido para sugerencias ({duration_minutes//60}h {duration_minutes%60}m)"
+            }
             
-            suggestions = []
-            note = ""
+        # Generar sugerencias según duración
+        suggestions = []
+        if duration_minutes >= 240:  # ≥4h - atracciones
+            suggestion_types = ['tourist_attraction', 'point_of_interest', 'park', 'natural_feature', 'museum', 'art_gallery']
+        elif duration_minutes >= 120:  # 2-4h - mix
+            suggestion_types = ['restaurant', 'cafe', 'tourist_attraction', 'bakery']
+        else:  # <2h - comida
+            suggestion_types = ['restaurant', 'cafe', 'bakery']
             
-            if location and block_duration >= 60:  # Al menos 1 hora libre
-                try:
-                    # Seleccionar tipos según duración del bloque libre
-                    types = self._select_types_by_duration(block_duration)
-                    
-                    # Búsqueda robusta de lugares cercanos
-                    raw_suggestions = await self.places_service.search_nearby(
-                        lat=location[0],
-                        lon=location[1], 
-                        types=types,
-                        radius_m=settings.FREE_DAY_SUGGESTIONS_RADIUS_M,
-                        limit=settings.FREE_DAY_SUGGESTIONS_LIMIT
+        # Intentar búsqueda real con Google Places ANCLADA al origen
+        try:
+            if origin_lat != 0.0 and origin_lon != 0.0:
+                for place_type in suggestion_types[:3]:  # Máximo 3 tipos
+                    places = await self.google_places_service.search_nearby(
+                        lat=origin_lat, lon=origin_lon,
+                        types=[place_type], radius_m=3000, limit=2
                     )
                     
-                    # Enriquecer sugerencias con ETAs y razones
-                    suggestions = await self._enrich_suggestions(raw_suggestions, location, block_duration)
-                    
-                    if suggestions:
-                        note = f"Sugerencias para {block_duration//60}h de tiempo libre"
-                    else:
-                        note = "No se encontraron sugerencias cercanas"
+                    for place in places[:2]:  # Máximo 2 por tipo
+                        eta_minutes = max(1, int(haversine_km(
+                            origin_lat, origin_lon, 
+                            place.get('lat', origin_lat), place.get('lon', origin_lon)
+                        ) * 60 / 5))  # ~5km/h caminando
                         
-                except Exception as e:
-                    self.logger.warning(f"Error generando sugerencias: {e}")
-                    note = "Servicio de sugerencias temporalmente no disponible"
-            
-            free_block = FreeBlock(
-                start_time=current_time,
-                end_time=day_end,
-                duration_minutes=block_duration,
-                suggestions=suggestions,
-                note=note
-            )
-            
-            free_blocks.append(free_block)
+                        suggestions.append({
+                            'name': place.get('name', f'Lugar de {place_type}'),
+                            'lat': place.get('lat', origin_lat),
+                            'lon': place.get('lon', origin_lon),
+                            'type': place_type,
+                            'rating': place.get('rating', 4.0),
+                            'eta_minutes': eta_minutes,
+                            'reason': f"buen rating ({place.get('rating', 4.0):.1f}⭐), {'muy cerca' if eta_minutes <= 5 else 'cerca'}",
+                            'synthetic': False
+                        })
+                        
+        except Exception as e:
+            self.logger.warning(f"Error generando sugerencias reales: {e}")
         
-        return free_blocks
+        # Si no hay sugerencias reales, generar sintéticas ANCLADAS al origen
+        if not suggestions and origin_lat != 0.0:
+            for i, place_type in enumerate(suggestion_types[:6]):
+                # Generar coordenadas sintéticas CERCA del origen (no en 0,0)
+                offset_lat = origin_lat + (i * 0.001) - 0.003  # ±3km aprox del origen
+                offset_lon = origin_lon + (i * 0.001) - 0.003
+                
+                eta_minutes = max(0, i * 3)
+                rating = 4.0 + (i * 0.1)
+                
+                suggestions.append({
+                    'name': self._generate_synthetic_name(place_type),
+                    'lat': offset_lat,
+                    'lon': offset_lon,
+                    'type': place_type,
+                    'rating': rating,
+                    'eta_minutes': eta_minutes,
+                    'reason': f"buen rating ({rating:.1f}⭐), {'muy cerca' if eta_minutes <= 5 else 'cerca'}",
+                    'synthetic': True
+                })
+        
+        return {
+            'start_time': start_minutes,
+            'end_time': end_minutes, 
+            'duration_minutes': duration_minutes,
+            'suggestions': suggestions,
+            'note': f"Sugerencias para {duration_minutes//60}h {duration_minutes%60}m de tiempo libre"
+        }
     
     async def _generate_free_blocks(
         self, 
@@ -1238,6 +1522,10 @@ async def optimize_itinerary_hybrid_v31(
     🚀 HYBRID OPTIMIZER V3.1 - ENHANCED VERSION
     """
     optimizer = HybridOptimizerV31()
+    
+    # 🔄 RESET COMPLETO DE ESTADO - Evitar fugas de contexto
+    optimizer._reset_context()
+    
     time_window = TimeWindow(
         start=daily_start_hour * 60,
         end=daily_end_hour * 60
@@ -1246,6 +1534,36 @@ async def optimize_itinerary_hybrid_v31(
     logging.info(f"🚀 Iniciando optimización híbrida V3.1")
     logging.info(f"📍 {len(places)} lugares, {(end_date - start_date).days + 1} días")
     logging.info(f"📦 Estrategia: {packing_strategy}")
+    
+    # 🔍 VALIDACIÓN GEOGRÁFICA TEMPRANA
+    if places and len(places) > 1:
+        max_distance = 0
+        for i in range(len(places)):
+            for j in range(i + 1, len(places)):
+                distance = haversine_km(
+                    places[i]['lat'], places[i]['lon'],
+                    places[j]['lat'], places[j]['lon']
+                )
+                max_distance = max(max_distance, distance)
+                logging.info(f"📏 Distancia {places[i]['name']} -> {places[j]['name']}: {distance:.0f}km")
+        
+        logging.info(f"📏 Distancia máxima entre lugares: {max_distance:.0f}km")
+        
+        # Si hay lugares a más de 500km de distancia, es incoherente geográficamente
+        if max_distance > 500:
+            place_locations = [(p['name'], p['lat'], p['lon']) for p in places]
+            logging.error(f"❌ Error geográfico: lugares separados por {max_distance:.0f}km")
+            logging.error(f"📍 Ubicaciones: {place_locations}")
+            raise ValueError(
+                f"Geographic coherence error: Places are separated by {max_distance:.0f}km. "
+                f"Cannot create itinerary with locations in different regions/countries. "
+                f"Please group places by geographic proximity."
+            )
+    
+    # Calcular centroide general del request para fallbacks
+    if places:
+        overall_centroid = optimizer._calculate_centroid(places)
+        optimizer._set_overall_centroid(overall_centroid)
     
     # 1. Clustering POIs
     clusters = optimizer.cluster_pois(places)
@@ -1267,9 +1585,25 @@ async def optimize_itinerary_hybrid_v31(
     
     for date_str, assigned_clusters in day_assignments.items():
         if not assigned_clusters:
-            # Día libre con sugerencias
-            free_blocks = await optimizer._generate_free_blocks(
-                time_window.start, time_window.end, previous_end_location
+            # Día libre con sugerencias ANCLADAS al centroide general
+            duration_minutes = time_window.end - time_window.start
+            
+            # Base virtual coherente
+            virtual_base = None
+            if optimizer._overall_centroid:
+                virtual_base = {
+                    'name': "Centro del itinerario",
+                    'lat': optimizer._overall_centroid['lat'],
+                    'lon': optimizer._overall_centroid['lon'],
+                    'address': "Base virtual para día libre",
+                    'rating': 0.0,
+                    'type': 'virtual_base',
+                    'reference_place': 'overall_centroid'
+                }
+            
+            free_block = await optimizer._generate_free_blocks_enhanced(
+                time_window.start, time_window.end, duration_minutes,
+                virtual_base, transport_mode  # Usar transport_mode del parámetro
             )
             
             days.append({
@@ -1277,8 +1611,8 @@ async def optimize_itinerary_hybrid_v31(
                 "activities": [],
                 "timeline": [],
                 "transfers": [],
-                "free_blocks": free_blocks,
-                "base": None,
+                "free_blocks": [free_block] if free_block else [],
+                "base": virtual_base,  # Base virtual coherente
                 "travel_summary": {
                     "total_travel_time_s": 0,
                     "total_distance_km": 0,
@@ -1287,7 +1621,7 @@ async def optimize_itinerary_hybrid_v31(
                     "intercity_transfers_count": 0,
                     "intercity_total_minutes": 0
                 },
-                "free_minutes": time_window.end - time_window.start
+                "free_minutes": duration_minutes
             })
             continue
         
