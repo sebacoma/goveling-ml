@@ -1,5 +1,5 @@
 # api.py
-from typing import List, Optional
+from typing import List, Optional, Dict
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, time as dt_time
 import time as time_module
 
-from models.schemas_new import *
+from models.schemas_new import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
 from settings import settings
 from services.hotel_recommender import HotelRecommender
 
@@ -122,8 +122,8 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 place_dict = {
                     'name': place.name,
                     'lat': place.lat,
-                    'lon': place.get_longitude(),  # Usa el método auxiliar para obtener longitud
-                    'type': place.get_type(),      # Usa el método auxiliar para obtener tipo
+                    'lon': place.lon,  # Usamos directamente lon
+                    'type': str(place.type.value) if place.type else None,  # Usamos directamente type
                     'priority': place.priority,
                     'rating': place.rating,
                     'image': place.image,
@@ -565,40 +565,46 @@ async def recommend_hotels_endpoint(request: HotelRecommendationRequest):
             price_preference=request.price_preference
         )
         
-        # Formatear respuesta
-        formatted_response = hotel_recommender.format_recommendations_for_api(recommendations)
-        
-        # Calcular métricas adicionales
+        # Formatear recomendaciones como una lista
+        formatted_hotels = []
         if recommendations:
             centroid = hotel_recommender.calculate_geographic_centroid(places_data)
-            formatted_response["analysis"] = {
-                "places_analyzed": len(places_data),
-                "activity_centroid": {
-                    "latitude": round(centroid[0], 6),
-                    "longitude": round(centroid[1], 6)
-                },
-                "best_option": {
-                    "name": recommendations[0].name,
-                    "convenience_score": recommendations[0].convenience_score,
-                    "distance_to_centroid_km": recommendations[0].distance_to_centroid_km
-                },
-                "average_distance_range": {
-                    "min_km": round(min(r.avg_distance_to_places_km for r in recommendations), 2),
-                    "max_km": round(max(r.avg_distance_to_places_km for r in recommendations), 2)
+            for hotel in recommendations:
+                formatted_hotel = {
+                    "name": hotel.name,
+                    "lat": hotel.lat,
+                    "lon": hotel.lon,
+                    "address": hotel.address,
+                    "rating": hotel.rating,
+                    "price_range": hotel.price_range,
+                    "convenience_score": hotel.convenience_score,
+                    "type": "hotel",
+                    "distance_to_centroid_km": hotel.distance_to_centroid_km,
+                    "avg_distance_to_places_km": hotel.avg_distance_to_places_km,
+                    "analysis": {
+                        "places_analyzed": len(places_data),
+                        "activity_centroid": {
+                            "latitude": round(centroid[0], 6),
+                            "longitude": round(centroid[1], 6)
+                        }
+                    }
                 }
-            }
+                formatted_hotels.append(formatted_hotel)
         
         # Métricas de rendimiento
         duration = time_module.time() - start_time
-        formatted_response["performance"] = {
-            "processing_time_s": round(duration, 2),
-            "generated_at": datetime.now().isoformat()
-        }
+        
+        # Añadir métricas de rendimiento a cada hotel
+        for hotel in formatted_hotels:
+            hotel["performance"] = {
+                "processing_time_s": round(duration, 2),
+                "generated_at": datetime.now().isoformat()
+            }
         
         logging.info(f"🏨 Recomendaciones de hoteles generadas en {duration:.2f}s")
         logging.info(f"📊 Mejor opción: {recommendations[0].name if recommendations else 'Ninguna'}")
         
-        return formatted_response
+        return formatted_hotels  # Retornamos la lista de hoteles
         
     except Exception as e:
         logging.error(f"❌ Error recomendando hoteles: {e}")

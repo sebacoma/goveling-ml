@@ -271,37 +271,32 @@ class HotelRecommender:
         
         return recommendations
     
-    def format_recommendations_for_api(self, recommendations: List[HotelRecommendation]) -> Dict:
+    def format_recommendations_for_api(self, recommendations: List[HotelRecommendation]) -> List[Dict]:
         """Formatear recomendaciones para respuesta API"""
-        return {
-            "hotel_recommendations": [
-                {
-                    "name": rec.name,
-                    "coordinates": {
-                        "latitude": rec.lat,
-                        "longitude": rec.lon
-                    },
-                    "type": rec.type,
-                    "address": rec.address,
-                    "rating": rec.rating,
-                    "price_range": rec.price_range,
-                    "distance_to_centroid_km": rec.distance_to_centroid_km,
-                    "avg_distance_to_places_km": rec.avg_distance_to_places_km,
-                    "convenience_score": rec.convenience_score,
-                    "reasoning": rec.reasoning,
-                    "recommendation_rank": i + 1
+        return [
+            {
+                "name": rec.name,
+                "lat": rec.lat,
+                "lon": rec.lon,
+                "type": rec.type,
+                "address": rec.address,
+                "rating": rec.rating,
+                "price_range": rec.price_range,
+                "distance_to_centroid_km": rec.distance_to_centroid_km,
+                "avg_distance_to_places_km": rec.avg_distance_to_places_km,
+                "convenience_score": rec.convenience_score,
+                "reasoning": rec.reasoning,
+                "recommendation_rank": i + 1,
+                "selection_criteria": {
+                    "based_on": "geographic_proximity_to_planned_activities",
+                    "factors": [
+                        "distance_to_activity_centroid",
+                        "average_distance_to_all_places", 
+                        "hotel_rating",
+                        "central_location_bonus"
+                    ],
+                    "algorithm": "weighted_convenience_score"
                 }
-                for i, rec in enumerate(recommendations)
-            ],
-            "total_recommendations": len(recommendations),
-            "selection_criteria": {
-                "based_on": "geographic_proximity_to_planned_activities",
-                "factors": [
-                    "distance_to_activity_centroid",
-                    "average_distance_to_all_places", 
-                    "hotel_rating",
-                    "central_location_bonus"
-                ],
-                "algorithm": "weighted_convenience_score"
             }
-        }
+            for i, rec in enumerate(recommendations)
+        ]
