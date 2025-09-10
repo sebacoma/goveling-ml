@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     CITY_SPEED_KMH_TRANSIT: float = 25.0  # transporte público
     MIN_TRAVEL_MIN: int = 8     # mínimo realista por traslado
     
+    # Clustering geográfico y detección de traslados largos
+    CLUSTER_EPS_KM: float = 12.0        # Radio máximo para considerar lugares en la misma "zona/ciudad"
+    CLUSTER_MIN_SAMPLES: int = 1        # Mínimo de lugares para formar un cluster
+    WALK_MAX_KM: float = 2.0           # Máximo para caminar (>2km forzar auto/bus)
+    INTERCITY_THRESHOLD_KM: float = 30.0  # Umbral para considerar "traslado interurbano"
+    LONG_TRANSFER_MIN: int = 120       # Minutos para considerar un traslado "largo"
+    
+    # Velocidades para fallback cuando Google Directions falla
+    WALK_KMH: float = 4.5              # Velocidad caminando
+    DRIVE_KMH: float = 50.0            # Velocidad en auto (interurbano)
+    TRANSIT_KMH: float = 35.0          # Velocidad transporte público
+    
     class Config:
         env_file = ".env"
 

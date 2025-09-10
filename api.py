@@ -197,6 +197,33 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             f"Tiempo total de viaje: {int(total_travel_minutes)} minutos"
         ])
         
+        # 🚗 Añadir información sobre traslados largos detectados
+        optimization_metrics = optimization_result.get('optimization_metrics', {})
+        if optimization_metrics.get('long_transfers_detected', 0) > 0:
+            transfer_count = optimization_metrics['long_transfers_detected']
+            total_intercity_time = optimization_metrics.get('total_intercity_time_hours', 0)
+            total_intercity_distance = optimization_metrics.get('total_intercity_distance_km', 0)
+            
+            base_recommendations.extend([
+                f"🚗 {transfer_count} traslado(s) interurbano(s) detectado(s)",
+                f"📏 Distancia total entre ciudades: {total_intercity_distance:.0f}km", 
+                f"⏱️ Tiempo total de traslados largos: {total_intercity_time:.1f}h"
+            ])
+            
+            # Añadir detalles de cada traslado si hay pocos
+            if transfer_count <= 3 and 'intercity_transfers' in optimization_metrics:
+                for transfer in optimization_metrics['intercity_transfers']:
+                    base_recommendations.append(
+                        f"  • {transfer['from']} → {transfer['to']}: "
+                        f"{transfer['distance_km']:.0f}km (~{transfer['estimated_time_hours']:.1f}h)"
+                    )
+            
+            # Advertencia sobre modo de transporte si el usuario pidió caminar
+            if request.transport_mode == 'walk':
+                base_recommendations.append(
+                    "⚠️ Algunos tramos exceden el límite para caminar. Se recomienda auto/bus para traslados largos."
+                )
+        
         # Formatear respuesta para frontend simplificada
         def format_place_for_frontend(activity, order):
             """Convertir actividad interna a formato esperado por frontend"""

@@ -4,6 +4,8 @@ import logging
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
+import numpy as np
+from sklearn.cluster import DBSCAN
 
 from utils.google_directions_service import GoogleDirectionsService
 from utils.google_maps_client import GoogleMapsClient
@@ -62,21 +64,77 @@ class HybridIntelligentOptimizer:
     async def estimate_travel_time_hybrid(self, lat1: float, lon1: float, 
                                          lat2: float, lon2: float, 
                                          transport_mode: str) -> int:
-        """Estimar tiempo de viaje usando método híbrido"""
+        """Estimar tiempo de viaje usando método híbrido mejorado con detección de traslados largos"""
         
         # 1. Calcular distancia con Haversine
         distance_km = self.haversine_km(lat1, lon1, lat2, lon2)
         
-        # 2. Si la distancia es corta, usar estimación rápida
-        if distance_km <= self.max_walking_distance_km:
-            return self._estimate_travel_time_fast(distance_km, transport_mode)
+        # 2. Detectar y manejar traslados largos (inter-ciudades)
+        if distance_km > settings.INTERCITY_THRESHOLD_KM:
+            self.logger.warning(f"🚗 Traslado interurbano detectado: {distance_km:.1f}km - forzando modo auto/bus")
+            # Para traslados largos, siempre usar auto/bus independiente de user preference
+            return await self._calculate_long_distance_travel(distance_km, 'drive')
         
-        # 3. Si la distancia es larga, usar Google Directions API
-        try:
-            return await self._estimate_travel_time_google(lat1, lon1, lat2, lon2, transport_mode)
-        except Exception as e:
-            self.logger.warning(f"Google API falló, usando estimación: {e}")
+        # 3. Para distancias medias (>2km pero <30km), verificar modo de transporte
+        if distance_km > settings.WALK_MAX_KM:
+            # Prohibir caminar si es >2km
+            if transport_mode == 'walk':
+                self.logger.info(f"🚫 Distancia {distance_km:.1f}km excede límite para caminar - usando auto")
+                transport_mode = 'drive'
+        
+        # 4. Decidir si usar Google API o fallback
+        if distance_km <= self.max_walking_distance_km:
+            # Distancias cortas: usar estimación rápida para ahorrar API calls
             return self._estimate_travel_time_fast(distance_km, transport_mode)
+        else:
+            # Distancias medias: intentar Google API, fallback si falla
+            try:
+                return await self._estimate_travel_time_google(lat1, lon1, lat2, lon2, transport_mode)
+            except Exception as e:
+                self.logger.warning(f"Google API falló para {distance_km:.1f}km, usando fallback: {e}")
+                return self._estimate_travel_time_fallback(distance_km, transport_mode)
+    
+    async def _calculate_long_distance_travel(self, distance_km: float, mode: str = 'drive') -> int:
+        """Calcular tiempo de viaje para traslados largos con velocidades realistas"""
+        
+        # Velocidades para traslados largos (carretera)
+        if mode == 'drive':
+            speed_kmh = settings.DRIVE_KMH  # 50 km/h promedio interurbano
+        elif mode == 'transit':
+            speed_kmh = settings.TRANSIT_KMH  # 35 km/h promedio bus interurbano
+        else:
+            speed_kmh = settings.DRIVE_KMH  # Default auto
+        
+        # Calcular tiempo base
+        time_hours = distance_km / speed_kmh
+        time_minutes = int(time_hours * 60)
+        
+        # Añadir buffer para traslados largos (paradas, tráfico, etc.)
+        if distance_km > 100:
+            time_minutes += 30  # 30min buffer para traslados >100km
+        elif distance_km > 50:
+            time_minutes += 15  # 15min buffer para traslados >50km
+        
+        self.logger.info(f"🗺️ Traslado largo: {distance_km:.1f}km → {time_minutes}min ({speed_kmh}km/h + buffer)")
+        return time_minutes
+    
+    def _estimate_travel_time_fallback(self, distance_km: float, mode: str) -> int:
+        """Estimación de fallback usando velocidades configurables de settings"""
+        speeds = {
+            'walk': settings.WALK_KMH,
+            'bike': 15.0,  # Velocidad fija para bicicleta
+            'drive': settings.DRIVE_KMH,
+            'transit': settings.TRANSIT_KMH
+        }
+        
+        speed = speeds.get(mode, settings.WALK_KMH)
+        time_hours = distance_km / speed
+        time_minutes = int(time_hours * 60)
+        
+        # Mínimo realista
+        time_minutes = max(time_minutes, settings.MIN_TRAVEL_MIN if hasattr(settings, 'MIN_TRAVEL_MIN') else 8)
+        
+        return time_minutes
     
     def _estimate_travel_time_fast(self, distance_km: float, mode: str) -> int:
         """Estimación rápida basada en velocidades promedio"""
@@ -110,34 +168,72 @@ class HybridIntelligentOptimizer:
             raise Exception(f"Error Google API: {e}")
     
     def cluster_places_geographically(self, places: List[Dict]) -> Dict[int, List[Dict]]:
-        """Agrupar lugares por proximidad geográfica"""
+        """Agrupar lugares por proximidad geográfica usando DBSCAN para detectar ciudades separadas"""
+        
+        if len(places) < 2:
+            return {0: places}
+        
+        # Extraer coordenadas para DBSCAN
+        coordinates = np.array([[place['lat'], place['lon']] for place in places])
+        
+        # Configurar DBSCAN con métrica de distancia Haversine
+        # eps está en radianes, necesitamos convertir desde km
+        earth_radius_km = 6371.0
+        eps_radians = settings.CLUSTER_EPS_KM / earth_radius_km
+        
+        # DBSCAN con métrica Haversine para detectar clusters geográficos
+        dbscan = DBSCAN(
+            eps=eps_radians, 
+            min_samples=settings.CLUSTER_MIN_SAMPLES, 
+            metric='haversine'
+        )
+        
+        # Convertir coordenadas a radianes para Haversine
+        coordinates_rad = np.radians(coordinates)
+        cluster_labels = dbscan.fit_predict(coordinates_rad)
+        
+        # Organizar lugares por cluster
         clusters = {}
-        cluster_id = 0
+        outliers = []  # Lugares marcados como ruido por DBSCAN (-1)
         
-        for place in places:
-            # Buscar cluster existente cercano
-            assigned = False
-            for cid, cluster_places in clusters.items():
-                # Calcular distancia al centroide del cluster
-                centroid_lat = sum(p['lat'] for p in cluster_places) / len(cluster_places)
-                centroid_lon = sum(p['lon'] for p in cluster_places) / len(cluster_places)
-                
-                distance = self.haversine_km(place['lat'], place['lon'], 
-                                           centroid_lat, centroid_lon)
-                
-                if distance <= self.cluster_radius_km:
-                    clusters[cid].append(place)
-                    place['cluster_id'] = cid
-                    assigned = True
-                    break
+        for i, label in enumerate(cluster_labels):
+            place = places[i].copy()
             
-            # Crear nuevo cluster si no se asignó
-            if not assigned:
-                clusters[cluster_id] = [place]
-                place['cluster_id'] = cluster_id
-                cluster_id += 1
+            if label == -1:  # Outlier/ruido - lugar muy alejado
+                outliers.append(place)
+                self.logger.warning(f"🗺️ Outlier detectado: {place['name']} está >={settings.CLUSTER_EPS_KM}km de otros lugares")
+            else:
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(place)
+                place['cluster_id'] = label
         
-        self.logger.info(f"🗺️ Clustering: {len(places)} lugares en {len(clusters)} clusters geográficos")
+        # Asignar outliers a clusters individuales
+        next_cluster_id = max(clusters.keys()) + 1 if clusters else 0
+        for outlier in outliers:
+            clusters[next_cluster_id] = [outlier]
+            outlier['cluster_id'] = next_cluster_id
+            next_cluster_id += 1
+        
+        # Log detallado del clustering
+        total_clusters = len(clusters)
+        cluster_info = []
+        
+        for cluster_id, cluster_places in clusters.items():
+            if len(cluster_places) == 1:
+                place_name = cluster_places[0]['name']
+                cluster_info.append(f"Cluster {cluster_id}: {place_name} (aislado)")
+            else:
+                place_names = [p['name'] for p in cluster_places]
+                cluster_info.append(f"Cluster {cluster_id}: {len(cluster_places)} lugares ({', '.join(place_names[:2])}{'...' if len(place_names) > 2 else ''})")
+        
+        self.logger.info(f"🗺️ Clustering DBSCAN: {len(places)} lugares en {total_clusters} clusters geográficos")
+        for info in cluster_info[:5]:  # Mostrar solo los primeros 5 clusters
+            self.logger.info(f"  - {info}")
+        
+        if len(outliers) > 0:
+            self.logger.warning(f"⚠️ {len(outliers)} lugar(es) detectado(s) como outlier(s) - posibles traslados interurbanos")
+        
         return clusters
     
     def optimize_cluster_order(self, cluster_places: List[Dict], 
@@ -187,7 +283,10 @@ class HybridIntelligentOptimizer:
                 cluster_places, transport_mode
             )
         
-        # 3. Distribuir clusters entre días disponibles
+        # 3. 🚗 ANALIZAR DISTANCIAS ENTRE CLUSTERS ANTES DE ASIGNAR DÍAS
+        cluster_distances = self._calculate_cluster_distances(optimized_clusters)
+        
+        # 4. Distribuir clusters entre días disponibles INTELIGENTEMENTE
         days_available = (end_date - start_date).days + 1
         daily_schedule = {}
         
@@ -197,32 +296,40 @@ class HybridIntelligentOptimizer:
             daily_schedule[date_str] = []
             current_date += timedelta(days=1)
         
-        # 4. Asignar clusters a días (distribuir balanceadamente)
+        # 5. 🧠 ASIGNAR CLUSTERS A DÍAS EVITANDO TRASLADOS LARGOS
         day_keys = list(daily_schedule.keys())
-        cluster_items = list(optimized_clusters.items())
+        unscheduled_places = []
         
-        # Distribuir clusters por días balanceadamente
-        for i, (cluster_id, cluster_places) in enumerate(cluster_items):
-            day_key = day_keys[i % len(day_keys)]
-            
-            # Programar actividades del cluster en el día
-            activities = await self._schedule_cluster_in_day(
-                cluster_places, daily_window, day_key, transport_mode
-            )
-            daily_schedule[day_key].extend(activities)
+        # Estrategia inteligente: Separar clusters distantes en días diferentes
+        await self._assign_clusters_to_days_smart(
+            optimized_clusters, cluster_distances, daily_schedule, 
+            daily_window, transport_mode, unscheduled_places
+        )
         
-        # 5. Log resumen
+        # 6. Redistribuir lugares que no cupieron
+        if unscheduled_places:
+            self.logger.info(f"🔄 Redistribuyendo {len(unscheduled_places)} lugares que no cupieron inicialmente")
+            await self._redistribute_unscheduled_places(unscheduled_places, daily_schedule, daily_window, transport_mode)
+        
+        # 7. 🚗 DETECTAR E INSERTAR TRASLADOS LARGOS ENTRE CLUSTERS/DÍAS (verificación final)
+        long_transfers = await self._detect_and_insert_long_transfers(daily_schedule, clusters, transport_mode)
+        
+        # 8. Log resumen
         total_scheduled = sum(len(activities) for activities in daily_schedule.values())
         self.logger.info(f"✅ Programación completada: {total_scheduled} actividades en {days_available} días")
         
+        # 9. Guardar información de traslados largos para el formateo
+        self.long_transfers_detected = long_transfers
+        
         return daily_schedule
     
-    async def _schedule_cluster_in_day(self, places: List[Dict], 
-                                      time_window: TimeWindow,
-                                      date: str,
-                                      transport_mode: str) -> List[OptimizedActivity]:
-        """Programar un cluster de lugares en un día específico"""
+    async def _schedule_cluster_in_day_with_overflow(self, places: List[Dict], 
+                                                   time_window: TimeWindow,
+                                                   date: str,
+                                                   transport_mode: str) -> Tuple[List[OptimizedActivity], List[Dict]]:
+        """Programar un cluster de lugares en un día específico, retornando también los que no cupieron"""
         activities = []
+        leftover_places = []
         current_time = time_window.start  # minutos desde medianoche
         
         self.logger.info(f"📍 Programando {len(places)} lugares para {date}")
@@ -253,6 +360,8 @@ class HybridIntelligentOptimizer:
             activity_end = current_time + duration
             if activity_end > time_window.end:
                 self.logger.warning(f"⚠️ Lugar {place['name']} no cabe en {date} (requiere hasta {int(activity_end)//60}:{int(activity_end)%60:02d})")
+                # En lugar de break, añadir los lugares restantes a leftover_places
+                leftover_places.extend(places[i:])
                 break
             
             # Calcular tiempo de viaje al siguiente lugar y recomendación de transporte ANTES de crear la actividad
@@ -319,6 +428,285 @@ class HybridIntelligentOptimizer:
             travel_str = f" (viaje: {travel_time}min)" if travel_time > 0 else ""
             self.logger.info(f"  ✓ {place['name']}: {start_str}-{end_str} ({duration}min){travel_str}")
         
+        return activities, leftover_places
+    
+    async def _redistribute_unscheduled_places(self, unscheduled_places: List[Dict], 
+                                              daily_schedule: Dict[str, List], 
+                                              daily_window: TimeWindow,
+                                              transport_mode: str):
+        """Intentar redistribuir lugares que no cupieron en su día inicial CON VALIDACIÓN DE DISTANCIAS"""
+        self.logger.info(f"🔄 Redistribuyendo {len(unscheduled_places)} lugares no programados")
+        
+        for place in unscheduled_places:
+            scheduled = False
+            
+            # Ordenar días por cantidad de actividades (priorizar días con menos actividades)
+            days_by_activity_count = sorted(daily_schedule.items(), 
+                                          key=lambda x: len(x[1]))
+            
+            for date, existing_activities in days_by_activity_count:
+                if scheduled:
+                    break
+                
+                # 🚗 VALIDACIÓN DE DISTANCIA: Verificar si este lugar puede estar en este día
+                if existing_activities:
+                    day_compatible = True
+                    
+                    for existing_activity in existing_activities:
+                        # Calcular distancia entre el lugar a redistribuir y las actividades existentes
+                        distance_km = self.haversine_km(
+                            place['lat'], place['lon'],
+                            existing_activity.lat, existing_activity.lon
+                        )
+                        
+                        # Si la distancia excede el umbral interurbano, NO redistribuir aquí
+                        if distance_km > settings.INTERCITY_THRESHOLD_KM:
+                            self.logger.warning(
+                                f"⚠️ {place['name']} NO puede ir en {date}: "
+                                f"distancia con {existing_activity.name} = {distance_km:.1f}km "
+                                f"(>{settings.INTERCITY_THRESHOLD_KM}km)"
+                            )
+                            day_compatible = False
+                            break
+                    
+                    # Si hay conflicto de distancia, saltar este día
+                    if not day_compatible:
+                        continue
+                
+                # Validación de tiempo (lógica original)
+                total_used_time = 0
+                if existing_activities:
+                    for activity in existing_activities:
+                        total_used_time += activity.duration_minutes
+                        total_used_time += activity.travel_time_to_next or 0
+                
+                # Estimar duración del nuevo lugar
+                new_duration = self._estimate_activity_duration(place)
+                available_time = (daily_window.end - daily_window.start) - total_used_time
+                
+                # Si hay suficiente tiempo Y es compatible por distancia, añadir al día
+                if available_time >= new_duration + 30:  # 30 min buffer
+                    try:
+                        # Intentar programar el lugar individual
+                        new_activities, _ = await self._schedule_cluster_in_day_with_overflow(
+                            [place], daily_window, date, transport_mode
+                        )
+                        
+                        if new_activities:
+                            daily_schedule[date].extend(new_activities)
+                            scheduled = True
+                            self.logger.info(f"✅ {place['name']} redistribuido al {date} (compatible por distancia)")
+                        
+                    except Exception as e:
+                        self.logger.warning(f"⚠️ Error redistribuyendo {place['name']}: {e}")
+                        continue
+            
+            if not scheduled:
+                self.logger.warning(f"⚠️ No se pudo redistribuir {place['name']} (sin días compatibles por distancia/tiempo)")
+    
+    async def _detect_and_insert_long_transfers(self, daily_schedule: Dict[str, List], 
+                                               clusters: Dict[int, List[Dict]], 
+                                               transport_mode: str):
+        """
+        🚗 Detectar y documentar traslados largos entre clusters en días consecutivos
+        """
+        days = sorted(daily_schedule.keys())
+        transfer_warnings = []
+        
+        for i in range(len(days) - 1):
+            current_day = days[i]
+            next_day = days[i + 1]
+            
+            current_activities = daily_schedule[current_day]
+            next_activities = daily_schedule[next_day]
+            
+            if not current_activities or not next_activities:
+                continue
+            
+            # Obtener última actividad del día actual y primera del siguiente
+            last_activity = current_activities[-1]
+            first_next_activity = next_activities[0]
+            
+            # Calcular distancia entre el último lugar del día y el primero del siguiente
+            distance_km = self.haversine_km(
+                last_activity.lat, last_activity.lon,
+                first_next_activity.lat, first_next_activity.lon
+            )
+            
+            # Detectar traslado largo
+            if distance_km > settings.INTERCITY_THRESHOLD_KM:
+                travel_time_min = await self._calculate_long_distance_travel(distance_km, 'drive')
+                
+                transfer_info = {
+                    'from_city': last_activity.name,
+                    'to_city': first_next_activity.name,
+                    'from_day': current_day,
+                    'to_day': next_day,
+                    'distance_km': distance_km,
+                    'estimated_time_min': travel_time_min,
+                    'recommended_transport': '🚗 Auto' if distance_km < 100 else f'🚗 Auto/Bus ({distance_km:.0f}km)'
+                }
+                
+                transfer_warnings.append(transfer_info)
+                
+                # Log del traslado detectado
+                self.logger.warning(
+                    f"🗺️ Traslado interurbano detectado: {last_activity.name} → {first_next_activity.name} "
+                    f"({distance_km:.1f}km, ~{travel_time_min//60}h{travel_time_min%60:02d}min)"
+                )
+                
+                # Actualizar el travel_time_to_next de la última actividad del día
+                # para reflejar el traslado largo al día siguiente
+                last_activity.travel_time_to_next = travel_time_min
+                last_activity.recommended_transport = transfer_info['recommended_transport']
+        
+        # Almacenar información de traslados para recommendations
+        if transfer_warnings:
+            self.long_transfers_detected = transfer_warnings
+            self.logger.info(f"🚗 {len(transfer_warnings)} traslado(s) interurbano(s) detectado(s) y documentado(s)")
+        else:
+            self.long_transfers_detected = []
+        
+        return transfer_warnings
+    
+    def _calculate_cluster_distances(self, clusters: Dict[int, List[Dict]]) -> Dict[tuple, float]:
+        """
+        Calcular distancias entre todos los pares de clusters para detectar traslados largos
+        """
+        cluster_distances = {}
+        cluster_ids = list(clusters.keys())
+        
+        for i, cluster_a_id in enumerate(cluster_ids):
+            for j, cluster_b_id in enumerate(cluster_ids):
+                if i >= j:  # Evitar duplicados y auto-comparación
+                    continue
+                    
+                cluster_a = clusters[cluster_a_id]
+                cluster_b = clusters[cluster_b_id]
+                
+                # Calcular centroide de cada cluster
+                centroid_a = self._get_cluster_centroid(cluster_a)
+                centroid_b = self._get_cluster_centroid(cluster_b)
+                
+                # Distancia entre centroides
+                distance_km = self.haversine_km(
+                    centroid_a[0], centroid_a[1],
+                    centroid_b[0], centroid_b[1]
+                )
+                
+                cluster_pair = (cluster_a_id, cluster_b_id)
+                cluster_distances[cluster_pair] = distance_km
+                
+                # Log para clusters muy separados
+                if distance_km > settings.INTERCITY_THRESHOLD_KM:
+                    cluster_a_name = cluster_a[0]['name'] if cluster_a else f"Cluster {cluster_a_id}"
+                    cluster_b_name = cluster_b[0]['name'] if cluster_b else f"Cluster {cluster_b_id}"
+                    self.logger.warning(
+                        f"🗺️ Clusters distantes detectados: {cluster_a_name} ↔ {cluster_b_name} "
+                        f"({distance_km:.1f}km) - DEBEN estar en días separados"
+                    )
+        
+        return cluster_distances
+    
+    def _get_cluster_centroid(self, cluster_places: List[Dict]) -> tuple:
+        """Calcular centroide geográfico de un cluster"""
+        if not cluster_places:
+            return (0, 0)
+        
+        lat_sum = sum(place['lat'] for place in cluster_places)
+        lon_sum = sum(place['lon'] for place in cluster_places)
+        count = len(cluster_places)
+        
+        return (lat_sum / count, lon_sum / count)
+    
+    async def _assign_clusters_to_days_smart(self, clusters: Dict[int, List[Dict]], 
+                                           cluster_distances: Dict[tuple, float],
+                                           daily_schedule: Dict[str, List],
+                                           daily_window: TimeWindow,
+                                           transport_mode: str,
+                                           unscheduled_places: List[Dict]):
+        """
+        Asignar clusters a días de forma inteligente, evitando traslados largos el mismo día
+        """
+        day_keys = list(daily_schedule.keys())
+        cluster_items = list(clusters.items())
+        assigned_clusters = {}  # cluster_id -> day_key
+        
+        self.logger.info(f"🧠 Asignación inteligente de {len(clusters)} clusters en {len(day_keys)} días")
+        
+        # Paso 1: Identificar clusters que NO pueden estar el mismo día
+        forbidden_same_day = set()
+        for (cluster_a, cluster_b), distance in cluster_distances.items():
+            if distance > settings.INTERCITY_THRESHOLD_KM:
+                forbidden_same_day.add((cluster_a, cluster_b))
+                forbidden_same_day.add((cluster_b, cluster_a))  # Ambas direcciones
+        
+        # Paso 2: Asignar clusters uno por uno, respetando restricciones
+        for i, (cluster_id, cluster_places) in enumerate(cluster_items):
+            
+            # Encontrar un día válido para este cluster
+            assigned_day = None
+            
+            for day_idx, day_key in enumerate(day_keys):
+                # Verificar si este día ya tiene clusters incompatibles
+                day_has_conflicting_cluster = False
+                
+                for other_cluster_id in assigned_clusters:
+                    if assigned_clusters[other_cluster_id] == day_key:
+                        # Verificar si hay conflicto de distancia
+                        if ((cluster_id, other_cluster_id) in forbidden_same_day or 
+                            (other_cluster_id, cluster_id) in forbidden_same_day):
+                            day_has_conflicting_cluster = True
+                            self.logger.info(
+                                f"⚠️ Cluster {cluster_id} NO puede ir en {day_key} "
+                                f"(conflicto de distancia con cluster {other_cluster_id})"
+                            )
+                            break
+                
+                # Si no hay conflicto, asignar a este día
+                if not day_has_conflicting_cluster:
+                    assigned_day = day_key
+                    break
+            
+            # Si no encontramos día válido, usar el siguiente disponible (round-robin)
+            if assigned_day is None:
+                assigned_day = day_keys[i % len(day_keys)]
+                self.logger.warning(
+                    f"⚠️ Cluster {cluster_id} forzado a {assigned_day} "
+                    f"(no hay días sin conflictos disponibles)"
+                )
+            
+            # Asignar cluster al día elegido
+            assigned_clusters[cluster_id] = assigned_day
+            
+            # Programar actividades del cluster en el día
+            activities, leftover_places = await self._schedule_cluster_in_day_with_overflow(
+                cluster_places, daily_window, assigned_day, transport_mode
+            )
+            daily_schedule[assigned_day].extend(activities)
+            
+            # Guardar lugares que no cupieron
+            if leftover_places:
+                unscheduled_places.extend(leftover_places)
+            
+            cluster_name = cluster_places[0]['name'] if cluster_places else f"Cluster {cluster_id}"
+            self.logger.info(f"📅 {cluster_name} asignado a {assigned_day}")
+        
+        # Log resumen de asignación
+        self.logger.info("📊 Resumen de asignación por días:")
+        for day_key, activities in daily_schedule.items():
+            if activities:
+                activity_names = [a.name for a in activities]
+                self.logger.info(f"  {day_key}: {', '.join(activity_names)}")
+    
+    async def _schedule_cluster_in_day(self, places: List[Dict], 
+                                      time_window: TimeWindow,
+                                      date: str,
+                                      transport_mode: str) -> List[OptimizedActivity]:
+        """Wrapper para mantener compatibilidad - solo retorna actividades programadas"""
+        activities, _ = await self._schedule_cluster_in_day_with_overflow(
+            places, time_window, date, transport_mode
+        )
         return activities
     
     def _estimate_activity_duration(self, place: Dict) -> int:
@@ -493,7 +881,9 @@ class HybridIntelligentOptimizer:
                 close_minutes = time_str_to_minutes(close_time_str)
                 
                 # Verificar si el horario propuesto está dentro del horario de apertura
-                if open_minutes <= proposed_time <= close_minutes - 60:  # Al menos 1h antes del cierre
+                # Ser más flexible: permitir visitar hasta 30 min antes del cierre (en lugar de 1h)
+                buffer_minutes = 30
+                if open_minutes <= proposed_time <= close_minutes - buffer_minutes:
                     return True, proposed_time, f"abierto {open_time_str}-{close_time_str}"
                 
                 # Si está cerrado, ajustar al horario de apertura
@@ -501,10 +891,23 @@ class HybridIntelligentOptimizer:
                     adjusted_time = open_minutes
                     self.logger.info(f"⏰ {place['name']}: ajustado a horario apertura {open_time_str}")
                     return True, adjusted_time, f"ajustado a apertura ({open_time_str})"
-                elif proposed_time > close_minutes - 60:
-                    # Muy tarde, programar para el día siguiente
-                    self.logger.warning(f"⚠️ {place['name']}: cierra a {close_time_str}, muy tarde para visitar")
-                    return False, proposed_time, f"cierra {close_time_str}"
+                elif proposed_time > close_minutes - buffer_minutes:
+                    # Ser más flexible: si es un restaurante o bar, permitir horarios nocturnos
+                    place_type = place.get('type', '').lower()
+                    if place_type in ['restaurant', 'bar', 'cafe', 'night_club'] and close_minutes > 1200:  # Cierra después de 20:00
+                        # Para lugares nocturnos, ajustar a horario de apertura
+                        adjusted_time = open_minutes
+                        self.logger.info(f"🌙 {place['name']}: lugar nocturno, ajustado a apertura {open_time_str}")
+                        return True, adjusted_time, f"lugar nocturno - apertura {open_time_str}"
+                    else:
+                        # Para otros lugares, ser más flexible y permitir visitas más cerca del cierre
+                        if proposed_time <= close_minutes:
+                            self.logger.info(f"⏰ {place['name']}: horario ajustado (cierra {close_time_str})")
+                            return True, proposed_time, f"visita tardía - cierra {close_time_str}"
+                        else:
+                            # Solo rechazar si está completamente fuera del horario
+                            self.logger.warning(f"⚠️ {place['name']}: cierra a {close_time_str}, muy tarde para visitar")
+                            return False, proposed_time, f"cierra {close_time_str}"
                 
                 return True, proposed_time, f"horario verificado {open_time_str}-{close_time_str}"
                 
@@ -644,7 +1047,33 @@ class HybridIntelligentOptimizer:
             # Score basado en ratio actividades/tiempo de viaje
             activity_to_travel_ratio = total_activities / (total_travel_time / 60)  # actividades por hora de viaje
             efficiency_score = min(1.0, activity_to_travel_ratio / 10)  # normalizar
+            
+            # Penalizar eficiencia si hay traslados muy largos
+            if hasattr(self, 'long_transfers_detected') and self.long_transfers_detected:
+                long_transfer_penalty = len(self.long_transfers_detected) * 0.1  # -10% por traslado largo
+                efficiency_score = max(0.1, efficiency_score - long_transfer_penalty)
         
+        # Añadir información sobre traslados largos a las métricas
+        long_transfer_info = {}
+        if hasattr(self, 'long_transfers_detected') and self.long_transfers_detected:
+            long_transfer_info = {
+                'long_transfers_detected': len(self.long_transfers_detected),
+                'intercity_transfers': [
+                    {
+                        'from': transfer['from_city'],
+                        'to': transfer['to_city'],
+                        'distance_km': round(transfer['distance_km'], 1),
+                        'estimated_time_hours': round(transfer['estimated_time_min'] / 60, 1),
+                        'transport': transfer['recommended_transport'],
+                        'from_day': transfer['from_day'],
+                        'to_day': transfer['to_day']
+                    }
+                    for transfer in self.long_transfers_detected
+                ],
+                'total_intercity_distance_km': round(sum(t['distance_km'] for t in self.long_transfers_detected), 1),
+                'total_intercity_time_hours': round(sum(t['estimated_time_min'] for t in self.long_transfers_detected) / 60, 1)
+            }
+
         return {
             'success': True,
             'days': formatted_days,
@@ -656,7 +1085,8 @@ class HybridIntelligentOptimizer:
                 'efficiency_score': round(efficiency_score, 2),
                 'geographic_clustering': True,
                 'hybrid_travel_estimation': True,
-                'avg_activities_per_day': round(total_activities / max(1, len(formatted_days)), 1)
+                'avg_activities_per_day': round(total_activities / max(1, len(formatted_days)), 1),
+                **long_transfer_info  # Incluir información de traslados largos
             }
         }
     
@@ -713,27 +1143,39 @@ class HybridIntelligentOptimizer:
     def recommend_transport_mode(self, distance_km: float, travel_time_min: float, 
                                available_modes: List[str] = None) -> str:
         """
-        🚗 Recomendar modo de transporte basado en distancia y tiempo
+        🚗 Recomendar modo de transporte basado en distancia y tiempo con detección de traslados largos
         """
         if not available_modes:
             available_modes = ['walk', 'drive', 'transit']
-            
-        # Lógica de recomendación inteligente con instrucciones
+        
+        # Detectar traslados interurbanos
+        if distance_km > settings.INTERCITY_THRESHOLD_KM:
+            if travel_time_min > settings.LONG_TRANSFER_MIN:
+                return f'� Auto (traslado largo {distance_km:.0f}km, ~{travel_time_min//60}h{travel_time_min%60:02d}min)'
+            else:
+                return f'🚗 Auto ({distance_km:.0f}km)'
+        
+        # Prohibir caminar si excede el límite
+        if distance_km > settings.WALK_MAX_KM:
+            if distance_km <= 5.0:
+                return '🚌 Transporte público' if 'transit' in available_modes else '🚗 Auto/Taxi'
+            elif distance_km <= 15.0:
+                return '🚗 Auto/Taxi'
+            else:
+                return f'🚗 Auto ({distance_km:.1f}km)'
+        
+        # Lógica normal para distancias cortas
         if distance_km <= 0.3:
             return '🚶 Caminar'  # Muy cerca
         elif distance_km <= 0.8:
-            return '🚶 Caminar'  # Caminata corta
-        elif distance_km <= 2.0:
+            return '� Caminar'  # Caminata corta
+        elif distance_km <= settings.WALK_MAX_KM:
             if travel_time_min <= 25:
                 return '🚶 Caminar'  # Caminata razonable
             else:
                 return '🚌 Transporte público' if 'transit' in available_modes else '🚗 Auto/Taxi'
-        elif distance_km <= 5.0:
-            return '🚗 Auto/Taxi' if 'drive' in available_modes else '🚌 Transporte público'
-        elif distance_km <= 15.0:
-            return '🚗 Auto/Taxi'
         else:
-            return '🚗 Auto/Taxi'  # Distancias largas
+            return '🚗 Auto/Taxi'  # Fallback
 
     async def schedule_with_hotels(self, places: List[Dict], 
                                  accommodations: List[Dict],
