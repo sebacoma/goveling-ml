@@ -63,6 +63,26 @@ class Settings(BaseSettings):
     DRIVE_THRESHOLD_KM: float = 15.0   # > 15km: driving recomendado
     TRANSIT_AVAILABLE: bool = True      # Si hay transporte público disponible
     
+    # Ventanas horarias por tipo de lugar
+    RESTAURANT_LUNCH_START: int = 12    # 12:00
+    RESTAURANT_LUNCH_END: int = 15      # 15:00
+    RESTAURANT_DINNER_START: int = 19   # 19:00
+    RESTAURANT_DINNER_END: int = 22     # 22:00
+    MUSEUM_PREFERRED_START: int = 10    # 10:00
+    MUSEUM_PREFERRED_END: int = 17      # 17:00
+    SHOPPING_PREFERRED_START: int = 10  # 10:00
+    SHOPPING_PREFERRED_END: int = 20    # 20:00
+    
+    # Estrategias de empaquetado
+    DEFAULT_PACKING_STRATEGY: str = "balanced"  # "compact" | "balanced" | "cluster_first"
+    MIN_ACTIVITIES_PER_DAY: int = 2
+    MAX_ACTIVITIES_PER_DAY: int = 6
+    TARGET_MINUTES_PER_DAY: int = 300   # 5 horas de actividades por día
+    
+    # Sugerencias para días libres
+    FREE_DAY_SUGGESTIONS_RADIUS_M: int = 3000
+    FREE_DAY_SUGGESTIONS_LIMIT: int = 6
+    
     class Config:
         env_file = ".env"
 

@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import logging
-from datetime import datetime, time as dt_time
+import asyncio
+from datetime import datetime, time as dt_time, timedelta
 import time as time_module
 
 from models.schemas import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
@@ -46,15 +47,19 @@ async def health_check():
 @app.post("/api/v2/itinerary/generate-hybrid", response_model=ItineraryResponse, tags=["Hybrid Optimizer"])
 async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
     """
-    🚀 OPTIMIZADOR HÍBRIDO INTELIGENTE v2.2 - CON DETECCIÓN AUTOMÁTICA DE HOTELES
+    🚀 OPTIMIZADOR HÍBRIDO INTELIGENTE V3.1 ENHANCED - MÁXIMA ROBUSTEZ
     
-    ✨ FUNCIONALIDADES NUEVAS:
-    - 🏨 Detección automática de hoteles/alojamientos como centroides
-    - 🚗 Recomendaciones inteligentes de transporte 
-    - 🔍 Modo automático: Con/Sin hoteles
-    - ↩️ Completamente retrocompatible
+    ✨ NUEVAS FUNCIONALIDADES V3.1:
+    - � Sugerencias inteligentes para bloques libres con duración-based filtering
+    - 🚶‍♂️🚗 Clasificación precisa walking vs transport (30min threshold)
+    - 🛡️ Normalización robusta de campos nulos
+    - 🏨 Home base inteligente (hoteles → hubs → centroide)
+    - 🛤️ Actividades especiales para transfers intercity largos
+    - � Recomendaciones procesables con acciones específicas
+    - � Retry automático y fallbacks sintéticos
+    - ⚡ Manejo de errores de API con degradación elegante
     
-    📊 CARACTERÍSTICAS TÉCNICAS:
+    📊 CARACTERÍSTICAS TÉCNICAS CORE:
     - 🗺️ Clustering geográfico automático (agrupa lugares cercanos)
     - 🏨 Clustering basado en hoteles (si se proporcionan alojamientos)
     - ⚡ Estimación híbrida de tiempos (Haversine + Google Directions API)
@@ -63,6 +68,13 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
     - 🚶‍♂️🚗🚌 Recomendaciones automáticas de transporte por tramo
     - ⏰ Respeto de horarios, buffers y tiempos de traslado
     - 💰 Eficiente en costos (solo usa Google API cuando es necesario)
+    
+    🛡️ ROBUSTEZ V3.1:
+    - Validación estricta de entrada con normalización automática
+    - Retry automático en caso de fallos temporales
+    - Fallbacks sintéticos cuando APIs fallan
+    - Manejo elegante de campos nulos/missing
+    - Respuestas mínimas garantizadas
     
     🏨 MODO HOTELES:
     - Envía 'accommodations' con tus hoteles/alojamientos
@@ -74,68 +86,97 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
     - No envíes 'accommodations' o envía lista vacía
     - Comportamiento actual (clustering automático)
     - Mantiene toda la funcionalidad existente
-    
-    VENTAJAS:
-    - Horarios más realistas y precisos
-    - Distribución equilibrada entre días
-    - Reducción de tiempo total de viaje
-    - Agrupación inteligente por zonas geográficas o hoteles
-    - Recomendaciones de transporte personalizadas
     """
     from utils.analytics import analytics
     
     start_time = time_module.time()
     
     try:
-        # 🔍 Detectar si se enviaron hoteles/alojamientos
+        # 🛡️ Validación robusta de entrada
+        if not request.places or len(request.places) == 0:
+            raise HTTPException(
+                status_code=400, 
+                detail="Al menos un lugar es requerido para generar el itinerario"
+            )
+        
+        if not request.start_date or not request.end_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Fechas de inicio y fin son requeridas"
+            )
+        
+        # 🔧 Normalizar lugares con campos faltantes
+        normalized_places = []
+        for i, place in enumerate(request.places):
+            try:
+                # Manejo más robusto de la conversión de Pydantic
+                if hasattr(place, 'dict'):
+                    place_dict = place.dict()
+                elif hasattr(place, '__dict__'):
+                    place_dict = place.__dict__
+                else:
+                    place_dict = place
+                
+                logger.info(f"📍 Normalizando lugar {i}: {place_dict.get('name', 'sin nombre')}")
+                
+                normalized_place = {
+                    'place_id': place_dict.get('place_id') or place_dict.get('id') or f"place_{i}",
+                    'name': place_dict.get('name') or f"Lugar {i+1}",
+                    'lat': float(place_dict.get('lat', 0.0)),
+                    'lon': float(place_dict.get('lon', 0.0)),
+                    'category': place_dict.get('category') or place_dict.get('type') or 'general',
+                    'type': place_dict.get('type') or place_dict.get('category') or 'point_of_interest',
+                    'rating': max(0.0, min(5.0, float(place_dict.get('rating', 0.0)))),
+                    'price_level': max(0, min(4, int(place_dict.get('price_level', 0)))),
+                    'address': place_dict.get('address') or '',
+                    'description': place_dict.get('description') or f"Visita a {place_dict.get('name', 'lugar')}",
+                    'photos': place_dict.get('photos') or [],
+                    'opening_hours': place_dict.get('opening_hours') or {},
+                    'website': place_dict.get('website') or '',
+                    'phone': place_dict.get('phone') or '',
+                    'priority': max(1, min(10, int(place_dict.get('priority', 5))))
+                }
+                
+                logger.info(f"✅ Lugar normalizado: {normalized_place['name']} ({normalized_place['lat']}, {normalized_place['lon']})")
+                normalized_places.append(normalized_place)
+            except Exception as e:
+                logger.error(f"❌ Error normalizando lugar {i}: {e}")
+                logger.error(f"   Tipo de objeto: {type(place)}")
+                logger.error(f"   Contenido: {place}")
+                # Continuar con lugar mínimo válido
+                normalized_places.append({
+                    'place_id': f"error_place_{i}",
+                    'name': f"Lugar {i+1}",
+                    'lat': 0.0,
+                    'lon': 0.0,
+                    'category': 'general',
+                    'type': 'point_of_interest',
+                    'rating': 0.0,
+                    'price_level': 0,
+                    'address': 'Dirección no disponible',
+                    'description': 'Lugar con información limitada',
+                    'photos': [],
+                    'opening_hours': {},
+                    'website': '',
+                    'phone': '',
+                    'priority': 5
+                })
+        
+        # 🔍 Detectar si se enviaron hoteles/alojamientos  
         accommodations_data = None
         hotels_provided = False
         
         if request.accommodations:
-            accommodations_data = [acc.dict() if hasattr(acc, 'dict') else acc 
-                                 for acc in request.accommodations]
-            hotels_provided = True
-            
-            analytics.track_request("hybrid_itinerary_with_hotels", {
-                "places_count": len(request.places),
-                "hotels_count": len(accommodations_data),
-                "days_requested": (request.end_date - request.start_date).days + 1,
-                "transport_mode": request.transport_mode
-            })
-            
-            logging.info(f"🏨 Detectados {len(accommodations_data)} hoteles - modo centroides")
-        else:
-            analytics.track_request("hybrid_itinerary_geographic", {
-                "places_count": len(request.places),
-                "days_requested": (request.end_date - request.start_date).days + 1,
-                "transport_mode": request.transport_mode
-            })
-            
-            logging.info("🗺️ Modo clustering geográfico automático")
+            try:
+                accommodations_data = [acc.dict() if hasattr(acc, 'dict') else acc 
+                                     for acc in request.accommodations]
+                hotels_provided = len(accommodations_data) > 0
+            except Exception as e:
+                logger.warning(f"Error procesando accommodations: {e}")
+                accommodations_data = None
         
-        logging.info(f"🚀 Iniciando optimización HÍBRIDA para {len(request.places)} lugares")
-        logging.info(f"📅 Período: {request.start_date} a {request.end_date} ({(request.end_date - request.start_date).days + 1} días)")
-        
-        # Convertir lugares a formato dict con campos normalizados
-        places_data = []
-        for place in request.places:
-            if hasattr(place, 'dict'):  # Es un objeto Pydantic
-                place_dict = {
-                    'name': place.name,
-                    'lat': place.lat,
-                    'lon': place.lon,  # Usamos directamente lon
-                    'type': str(place.type.value) if place.type else None,  # Usamos directamente type
-                    'priority': place.priority,
-                    'rating': place.rating,
-                    'image': place.image,
-                    'address': place.address
-                }
-            else:
-                place_dict = place
-            places_data.append(place_dict)
-        
-        # Usar optimizador híbrido V3.0 reestructurado
-        from utils.hybrid_optimizer_new import optimize_itinerary_hybrid
+        logger.info(f"🚀 Iniciando optimización V3.1 ENHANCED para {len(normalized_places)} lugares")
+        logger.info(f"📅 Período: {request.start_date} a {request.end_date}")
         
         # Convertir fechas
         if isinstance(request.start_date, str):
@@ -148,19 +189,100 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         else:
             end_date = datetime.combine(request.end_date, dt_time.min)
         
-        # 🚀 OPTIMIZACIÓN CON DETECCIÓN AUTOMÁTICA
-        optimization_result = await optimize_itinerary_hybrid(
-            places_data,
-            start_date,
-            end_date,
-            request.daily_start_hour,
-            request.daily_end_hour,
-            request.transport_mode,
-            accommodations_data  # ← Detección automática (puede ser None)
-        )
+        # 🔄 OPTIMIZACIÓN CON RETRY AUTOMÁTICO
+        from utils.hybrid_optimizer_v31 import optimize_itinerary_hybrid
+        
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                analytics.track_request("hybrid_itinerary_v31", {
+                    "places_count": len(normalized_places),
+                    "hotels_provided": hotels_provided,
+                    "days_requested": (end_date - start_date).days + 1,
+                    "transport_mode": request.transport_mode,
+                    "attempt": attempt + 1
+                })
+                
+                optimization_result = await optimize_itinerary_hybrid(
+                    normalized_places,
+                    start_date,
+                    end_date,
+                    request.daily_start_hour,
+                    request.daily_end_hour,
+                    request.transport_mode,
+                    accommodations_data
+                )
+                
+                # 🛡️ Validar resultado antes de continuar
+                if not optimization_result or 'days' not in optimization_result:
+                    raise ValueError("Resultado de optimización inválido")
+                
+                # Éxito - salir del loop de retry
+                break
+                
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Intento {attempt + 1}/{max_retries} falló: {e}")
+                
+                if attempt < max_retries - 1:
+                    # Esperar antes del siguiente intento
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+        
+        # 🚨 Si todos los intentos fallaron, crear fallback mínimo
+        if last_error is not None and 'optimization_result' not in locals():
+            logger.error(f"Optimización falló después de {max_retries} intentos: {last_error}")
+            
+            # Respuesta de fallback básica
+            fallback_days = {}
+            day_count = (end_date - start_date).days + 1
+            
+            for i in range(day_count):
+                date_key = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
+                fallback_days[date_key] = {
+                    "activities": normalized_places[:min(3, len(normalized_places))],  # Max 3 por día
+                    "transfers": [],
+                    "free_blocks": [],
+                    "actionable_recommendations": [
+                        {
+                            "type": "system_error",
+                            "priority": "high",
+                            "title": "Optimización temporal no disponible",
+                            "description": "Usando itinerario básico. Intenta nuevamente.",
+                            "action": "retry_optimization"
+                        }
+                    ],
+                    "base": None,
+                    "travel_summary": {
+                        "total_travel_time_s": 0,
+                        "walking_time_minutes": 0,
+                        "transport_time_minutes": 0
+                    }
+                }
+            
+            return ItineraryResponse(
+                days=fallback_days,
+                summary={
+                    "total_places": len(normalized_places),
+                    "total_days": day_count,
+                    "optimization_mode": "fallback_basic",
+                    "error": "Sistema temporalmente no disponible",
+                    "fallback_active": True
+                },
+                meta={
+                    "version": "V3.1_Enhanced_Fallback",
+                    "retry_attempts": max_retries,
+                    "error_occurred": True,
+                    "processing_time_seconds": time_module.time() - start_time
+                }
+            )
         
         # Extraer datos del resultado de optimización
         days_data = optimization_result.get("days", [])
+        optimization_metrics = optimization_result.get('optimization_metrics', {})
+        clusters_info = optimization_result.get('clusters_info', {})  # ← LÍNEA AÑADIDA
         
         # Contar actividades totales
         total_activities = sum(len(day.get("activities", [])) for day in days_data)
@@ -191,16 +313,14 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             ])
             
         base_recommendations.extend([
-            f"Método híbrido V3.0: DBSCAN clustering + ETAs reales",
+            f"Método híbrido V3.1: DBSCAN + Time Windows + ETAs reales",
             f"{total_activities} actividades distribuidas en {len(days_data)} días",
             f"Score de eficiencia: {optimization_result.get('optimization_metrics', {}).get('efficiency_score', 0.9):.1%}",
-            f"Tiempo total de viaje: {int(total_travel_minutes)} minutos"
+            f"Tiempo total de viaje: {int(total_travel_minutes)} minutos",
+            f"Estrategia de empaquetado: {clusters_info.get('packing_strategy_used', 'balanced')}"
         ])
         
         # 🚗 Añadir información sobre traslados largos detectados
-        optimization_metrics = optimization_result.get('optimization_metrics', {})
-        clusters_info = optimization_result.get('clusters_info', {})
-        
         if optimization_metrics.get('long_transfers_detected', 0) > 0:
             transfer_count = optimization_metrics['long_transfers_detected']
             total_intercity_time = optimization_metrics.get('total_intercity_time_hours', 0)
@@ -209,9 +329,12 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             base_recommendations.extend([
                 f"🚗 {transfer_count} traslado(s) interurbano(s) detectado(s)",
                 f"📏 Distancia total entre ciudades: {total_intercity_distance:.0f}km", 
-                f"⏱️ Tiempo total de traslados largos: {total_intercity_time:.1f}h",
-                f"🏨 {clusters_info.get('total_clusters', 0)} zona(s) geográfica(s) identificada(s)"
+                f"⏱️ Tiempo total de traslados largos: {total_intercity_time:.1f}h"
             ])
+            
+            # Información sobre clusters (validada)
+            if clusters_info:
+                base_recommendations.append(f"🏨 {clusters_info.get('total_clusters', 0)} zona(s) geográfica(s) identificada(s)")
             
             # Explicar separación de clusters
             base_recommendations.append("🗺️ Clusters separados por distancia para evitar traslados imposibles el mismo día")
@@ -231,8 +354,8 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     "⚠️ Modo de transporte cambiado automáticamente para traslados largos (walk → drive/transit)"
                 )
             
-            # Información sobre hoteles recomendados
-            if clusters_info.get('recommended_hotels', 0) > 0:
+            # Información sobre hoteles recomendados (validada)
+            if clusters_info and clusters_info.get('recommended_hotels', 0) > 0:
                 base_recommendations.append(
                     f"🏨 {clusters_info['recommended_hotels']} hotel(es) recomendado(s) automáticamente como base"
                 )
@@ -241,23 +364,49 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         # Formatear respuesta para frontend simplificada
         def format_activity_for_frontend(activity, order):
-            """Convertir ActivityItem a formato esperado por frontend"""
+            """Convertir ActivityItem o IntercityActivity a formato esperado por frontend"""
             import uuid
-            return {
-                "id": str(uuid.uuid4()),
-                "name": activity.name,
-                "category": activity.place_type,
-                "rating": activity.rating if activity.rating else 4.5,
-                "image": activity.image if activity.image else "",
-                "description": f"Actividad en {activity.name}",
-                "estimated_time": f"{activity.duration_minutes/60:.1f}h",
-                "priority": activity.priority,
-                "lat": activity.lat,
-                "lng": activity.lon,  # Frontend espera 'lng'
-                "recommended_duration": f"{activity.duration_minutes/60:.1f}h",
-                "best_time": f"{activity.start_time//60:02d}:{activity.start_time%60:02d}-{activity.end_time//60:02d}:{activity.end_time%60:02d}",
-                "order": order
-            }
+            
+            # Detectar si es una actividad intercity
+            is_intercity = getattr(activity, 'is_intercity_activity', False) or getattr(activity, 'type', '') == 'intercity_activity'
+            
+            if is_intercity:
+                # Formateo especial para actividades intercity
+                return {
+                    "id": str(uuid.uuid4()),
+                    "name": getattr(activity, 'name', 'Viaje intercity'),
+                    "category": "intercity_transfer",
+                    "rating": 0.0,
+                    "image": "",
+                    "description": getattr(activity, 'description', 'Viaje entre ciudades'),
+                    "estimated_time": f"{getattr(activity, 'duration_minutes', 0)/60:.1f}h",
+                    "priority": 0,
+                    "lat": getattr(activity, 'lat', 0.0),
+                    "lng": getattr(activity, 'lon', 0.0),
+                    "recommended_duration": f"{getattr(activity, 'duration_minutes', 0)/60:.1f}h",
+                    "best_time": f"{getattr(activity, 'start_time', 0)//60:02d}:{getattr(activity, 'start_time', 0)%60:02d}-{getattr(activity, 'end_time', 0)//60:02d}:{getattr(activity, 'end_time', 0)%60:02d}",
+                    "order": order,
+                    "transport_mode": getattr(activity, 'transport_mode', 'drive'),
+                    "is_intercity": True
+                }
+            else:
+                # Formateo normal para POIs con getattr para campos opcionales
+                return {
+                    "id": str(uuid.uuid4()),
+                    "name": getattr(activity, 'name', 'Lugar sin nombre'),
+                    "category": getattr(activity, 'place_type', getattr(activity, 'type', 'point_of_interest')),
+                    "rating": getattr(activity, 'rating', 4.5) or 4.5,
+                    "image": getattr(activity, 'image', ''),
+                    "description": getattr(activity, 'description', f"Actividad en {getattr(activity, 'name', 'lugar')}"),
+                    "estimated_time": f"{getattr(activity, 'duration_minutes', 60)/60:.1f}h",
+                    "priority": getattr(activity, 'priority', 5),
+                    "lat": getattr(activity, 'lat', 0.0),
+                    "lng": getattr(activity, 'lon', 0.0),  # Frontend espera 'lng'
+                    "recommended_duration": f"{getattr(activity, 'duration_minutes', 60)/60:.1f}h",
+                    "best_time": f"{getattr(activity, 'start_time', 0)//60:02d}:{getattr(activity, 'start_time', 0)%60:02d}-{getattr(activity, 'end_time', 0)//60:02d}:{getattr(activity, 'end_time', 0)%60:02d}",
+                    "order": order,
+                    "is_intercity": False
+                }
         
         # Convertir días a formato frontend
         itinerary_days = []
@@ -271,7 +420,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 frontend_places.append(frontend_place)
             
             # Calcular tiempos del día correctamente separados
-            total_activity_time = sum([act.duration_minutes for act in day.get("activities", [])])
+            total_activity_time = sum([getattr(act, 'duration_minutes', 0) for act in day.get("activities", [])])
             travel_summary = day.get("travel_summary", {})
             walking_time_min = travel_summary.get("walking_time_minutes", 0)
             transport_time_min = travel_summary.get("transport_time_minutes", 0)
@@ -297,9 +446,13 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 "is_tentative": False
             }
             
-            # Añadir transfers si existen (opcional para frontend)
+            # Añadir transfers y base si existen (campos opcionales para V3.1)
             if day.get("transfers"):
                 day_data["transfers"] = day["transfers"]
+            if day.get("base"):
+                day_data["base"] = day["base"]
+            if day.get("free_blocks"):
+                day_data["free_blocks"] = day["free_blocks"]
             
             itinerary_days.append(day_data)
             day_counter += 1
