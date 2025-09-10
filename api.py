@@ -22,13 +22,15 @@ app = FastAPI(
     version="2.2.0"
 )
 
-# Configurar CORS
+# Configurar CORS para permitir todas las solicitudes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Permite todos los orígenes
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],  # Permite todos los métodos
+    allow_headers=["*"],  # Permite todos los headers
+    expose_headers=["*"],  # Expone todos los headers
+    max_age=600,  # Cache preflight requests por 10 minutos
 )
 
 @app.get("/health")

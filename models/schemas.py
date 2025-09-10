@@ -49,35 +49,83 @@ class PlaceType(str, Enum):
     TOURIST_ATTRACTION = "tourist_attraction"
 
 class Place(BaseModel):
+    id: Optional[str] = None
     name: str = Field(..., min_length=1, max_length=100)
     lat: float = Field(..., ge=-90, le=90)
-    lon: float = Field(..., ge=-180, le=180)
-    type: PlaceType
+    lon: float = Field(alias='long', ge=-180, le=180)
+    type: PlaceType = Field(alias='category')
     priority: Optional[int] = Field(default=5, ge=1, le=10)
     min_duration_hours: Optional[float] = Field(default=None, ge=0.5, le=8)
     opening_hours: Optional[str] = None
+    rating: Optional[float] = Field(default=None, ge=0, le=5)
+    image: Optional[str] = None
+    address: Optional[str] = None
+    google_place_id: Optional[str] = None
+
+    @validator('lon', pre=True)
+    def validate_longitude(cls, v, values):
+        if isinstance(v, str):
+            return float(v)
+        return v
+
+    @validator('lat', pre=True)
+    def validate_latitude(cls, v, values):
+        if isinstance(v, str):
+            return float(v)
+        return v
     
     @validator('name')
     def name_must_not_be_empty(cls, v):
         if not v.strip():
             raise ValueError('El nombre no puede estar vacío')
         return v.strip()
+    
+    @validator('type', pre=True)
+    def validate_type(cls, v):
+        if isinstance(v, str):
+            # Mapear categorías comunes a tipos válidos
+            category_mapping = {
+                'restaurant': 'restaurant',
+                'accommodation': 'accommodation',
+                'shopping': 'shopping',
+                'attraction': 'attraction',
+                'lodging': 'lodging'
+            }
+            return category_mapping.get(v.lower(), v)
+        return v
+
+    class Config:
+        allow_population_by_field_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 class Accommodation(BaseModel):
     """Modelo para hoteles/alojamientos (completamente opcional)"""
+    id: Optional[str] = None
     name: str = Field(..., min_length=1, max_length=100)
     lat: float = Field(..., ge=-90, le=90)
     lon: float = Field(..., ge=-180, le=180)
     address: Optional[str] = None
     check_in_date: Optional[str] = None
     check_out_date: Optional[str] = None
-    type: Optional[str] = Field(default="hotel", description="hotel, airbnb, hostel, etc.")
+    type: Optional[str] = Field(default="accommodation", description="hotel, airbnb, hostel, etc.")
+    rating: Optional[float] = Field(default=None, ge=0, le=5)
+    image: Optional[str] = None
+    google_place_id: Optional[str] = None
+    category: Optional[str] = Field(default="accommodation")
     
     @validator('name')
     def name_must_not_be_empty(cls, v):
         if not v.strip():
             raise ValueError('El nombre del alojamiento no puede estar vacío')
         return v.strip()
+    
+    class Config:
+        allow_population_by_field_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 class Hotel(BaseModel):
     name: str
@@ -85,17 +133,34 @@ class Hotel(BaseModel):
     lon: float = Field(..., ge=-180, le=180)
     
 class ItineraryRequest(BaseModel):
-    places: List[Place] = Field(..., min_items=2, max_items=50)
+    places: List[Place] = Field(..., min_items=1, max_items=50)
     accommodations: Optional[List[Accommodation]] = Field(default=None, description="Hoteles/alojamientos opcionales para usar como centroides")
-    start_date: date
-    end_date: date
+    start_date: Union[date, str]
+    end_date: Union[date, str]
     daily_start_hour: int = Field(default=9, ge=6, le=12)
     daily_end_hour: int = Field(default=18, ge=15, le=23)
     hotel: Optional[Hotel] = None  # Mantenido para retrocompatibilidad
-    transport_mode: TransportMode = TransportMode.WALK
+    transport_mode: Union[TransportMode, str] = TransportMode.WALK
     max_walking_distance_km: Optional[float] = Field(default=15.0, ge=1, le=50)
     max_daily_activities: int = Field(default=6, ge=1, le=10)
     preferences: Optional[dict] = {}
+
+    @validator('transport_mode', pre=True)
+    def validate_transport_mode(cls, v):
+        if isinstance(v, str):
+            # Eliminar comillas extras si las hay
+            v = v.strip('"')
+            return TransportMode(v.lower())
+        return v
+
+    @validator('start_date', 'end_date', pre=True)
+    def validate_dates(cls, v):
+        if isinstance(v, str):
+            try:
+                return datetime.strptime(v, '%Y-%m-%d').date()
+            except ValueError as e:
+                raise ValueError(f'Formato de fecha inválido. Debe ser YYYY-MM-DD: {str(e)}')
+        return v
     
     @validator('end_date')
     def end_date_after_start(cls, v, values):
