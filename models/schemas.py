@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Literal
-from datetime import date, time
+from typing import List, Optional, Literal, Union
+from datetime import date, time, datetime
 from enum import Enum
 
 class Coordinates(BaseModel):
