@@ -109,8 +109,10 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         normalized_places = []
         for i, place in enumerate(request.places):
             try:
-                # Manejo más robusto de la conversión de Pydantic
-                if hasattr(place, 'dict'):
+                # Manejo correcto de conversión para Pydantic v2
+                if hasattr(place, 'model_dump'):
+                    place_dict = place.model_dump()
+                elif hasattr(place, 'dict'):
                     place_dict = place.dict()
                 elif hasattr(place, '__dict__'):
                     place_dict = place.__dict__
@@ -119,22 +121,61 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 
                 logger.info(f"📍 Normalizando lugar {i}: {place_dict.get('name', 'sin nombre')}")
                 
+                # Función helper para conversión segura
+                def safe_float(value, default=0.0):
+                    if value is None:
+                        return default
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return default
+                        
+                def safe_int(value, default=0):
+                    if value is None:
+                        return default
+                    try:
+                        return int(value)
+                    except (ValueError, TypeError):
+                        return default
+                        
+                def safe_str(value, default=""):
+                    if value is None:
+                        return default
+                    return str(value)
+                        
+                def safe_enum_value(value, default=""):
+                    """Extraer el valor del enum de PlaceType"""
+                    if value is None:
+                        return default
+                    # Si es un enum, extraer el valor
+                    if hasattr(value, 'value'):
+                        return value.value
+                    # Si es string que contiene el formato "PlaceType.VALUE"
+                    value_str = str(value)
+                    if 'PlaceType.' in value_str:
+                        return value_str.split('.')[-1].lower()
+                    return value_str
+                
+                # Obtener valores de category/type con manejo de enum
+                category_value = safe_enum_value(place_dict.get('category') or place_dict.get('type'), 'general')
+                type_value = safe_enum_value(place_dict.get('type') or place_dict.get('category'), 'point_of_interest')
+                
                 normalized_place = {
                     'place_id': place_dict.get('place_id') or place_dict.get('id') or f"place_{i}",
-                    'name': place_dict.get('name') or f"Lugar {i+1}",
-                    'lat': float(place_dict.get('lat', 0.0)),
-                    'lon': float(place_dict.get('lon', 0.0)),
-                    'category': place_dict.get('category') or place_dict.get('type') or 'general',
-                    'type': place_dict.get('type') or place_dict.get('category') or 'point_of_interest',
-                    'rating': max(0.0, min(5.0, float(place_dict.get('rating', 0.0)))),
-                    'price_level': max(0, min(4, int(place_dict.get('price_level', 0)))),
-                    'address': place_dict.get('address') or '',
-                    'description': place_dict.get('description') or f"Visita a {place_dict.get('name', 'lugar')}",
+                    'name': safe_str(place_dict.get('name'), f"Lugar {i+1}"),
+                    'lat': safe_float(place_dict.get('lat')),
+                    'lon': safe_float(place_dict.get('lon')),
+                    'category': category_value,
+                    'type': type_value,
+                    'rating': max(0.0, min(5.0, safe_float(place_dict.get('rating')))),
+                    'price_level': max(0, min(4, safe_int(place_dict.get('price_level')))),
+                    'address': safe_str(place_dict.get('address')),
+                    'description': safe_str(place_dict.get('description'), f"Visita a {place_dict.get('name', 'lugar')}"),
                     'photos': place_dict.get('photos') or [],
                     'opening_hours': place_dict.get('opening_hours') or {},
-                    'website': place_dict.get('website') or '',
-                    'phone': place_dict.get('phone') or '',
-                    'priority': max(1, min(10, int(place_dict.get('priority', 5))))
+                    'website': safe_str(place_dict.get('website')),
+                    'phone': safe_str(place_dict.get('phone')),
+                    'priority': max(1, min(10, safe_int(place_dict.get('priority'), 5)))
                 }
                 
                 logger.info(f"✅ Lugar normalizado: {normalized_place['name']} ({normalized_place['lat']}, {normalized_place['lon']})")
@@ -168,8 +209,14 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         if request.accommodations:
             try:
-                accommodations_data = [acc.dict() if hasattr(acc, 'dict') else acc 
-                                     for acc in request.accommodations]
+                accommodations_data = []
+                for acc in request.accommodations:
+                    if hasattr(acc, 'model_dump'):
+                        accommodations_data.append(acc.model_dump())
+                    elif hasattr(acc, 'dict'):
+                        accommodations_data.append(acc.dict())
+                    else:
+                        accommodations_data.append(acc)
                 hotels_provided = len(accommodations_data) > 0
             except Exception as e:
                 logger.warning(f"Error procesando accommodations: {e}")
