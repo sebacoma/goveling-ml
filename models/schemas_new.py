@@ -140,7 +140,7 @@ class ItineraryRequest(BaseModel):
     daily_end_hour: int = Field(default=18, ge=15, le=23)
     max_walking_distance_km: Optional[float] = Field(default=15.0, ge=1, le=50)
     max_daily_activities: int = Field(default=6, ge=1, le=10)
-    preferences: Optional[dict] = {}
+    preferences: Optional[dict] = Field(default_factory=dict)
 
     @validator('transport_mode', pre=True)
     def validate_transport_mode(cls, v):
@@ -166,7 +166,7 @@ class ItineraryRequest(BaseModel):
 
     class Config:
         validate_assignment = True
-        extra = "ignore", root_validator
+        extra = "ignore"
 from typing import List, Optional, Literal, Union
 from datetime import date, time, datetime
 from enum import Enum
