@@ -52,7 +52,25 @@ class Place(BaseModel):
     id: Optional[str] = None
     name: str = Field(..., min_length=1, max_length=100)
     lat: float = Field(..., ge=-90, le=90)
-    lon: float = Field(alias='long', ge=-180, le=180)
+    lon: float = Field(alias='long', ge=-180, le=180)  # Acepta tanto 'lon' como 'long'
+
+    @validator('lon', pre=True)
+    def validate_longitude(cls, v, values):
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                raise ValueError('La longitud debe ser un número válido')
+        return v
+
+    @validator('lat', pre=True)
+    def validate_latitude(cls, v, values):
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                raise ValueError('La latitud debe ser un número válido')
+        return v
     type: PlaceType = Field(alias='category')
     priority: Optional[int] = Field(default=5, ge=1, le=10)
     min_duration_hours: Optional[float] = Field(default=None, ge=0.5, le=8)
@@ -88,10 +106,27 @@ class Place(BaseModel):
                 'restaurant': 'restaurant',
                 'accommodation': 'accommodation',
                 'shopping': 'shopping',
-                'attraction': 'attraction',
-                'lodging': 'lodging'
+                'attraction': 'tourist_attraction',  # Mapear 'attraction' a 'tourist_attraction'
+                'lodging': 'lodging',
+                'cafe': 'cafe',
+                'bar': 'bar',
+                'store': 'store',
+                'movie_theater': 'movie_theater',
+                'museum': 'museum',
+                'park': 'park',
+                'church': 'church',
+                'monument': 'monument',
+                'beach': 'beach',
+                'zoo': 'zoo',
+                'night_club': 'night_club',
+                'shopping_mall': 'shopping_mall',
+                'point_of_interest': 'point_of_interest',
+                'tourist_attraction': 'tourist_attraction',
+                'establishment': 'establishment',
+                'food': 'food'
             }
-            return category_mapping.get(v.lower(), v)
+            normalized_type = v.lower().replace(' ', '_')
+            return category_mapping.get(normalized_type, 'point_of_interest')  # Default a point_of_interest si no hay match
         return v
 
     class Config:

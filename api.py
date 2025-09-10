@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, time as dt_time
 import time as time_module
 
-from models.schemas import *
+from models.schemas_new import *
 from settings import settings
 from services.hotel_recommender import HotelRecommender
 
@@ -115,11 +115,20 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         logging.info(f"🚀 Iniciando optimización HÍBRIDA para {len(request.places)} lugares")
         logging.info(f"📅 Período: {request.start_date} a {request.end_date} ({(request.end_date - request.start_date).days + 1} días)")
         
-        # Convertir lugares a formato dict
+        # Convertir lugares a formato dict con campos normalizados
         places_data = []
         for place in request.places:
             if hasattr(place, 'dict'):  # Es un objeto Pydantic
-                place_dict = place.dict()
+                place_dict = {
+                    'name': place.name,
+                    'lat': place.lat,
+                    'lon': place.get_longitude(),  # Usa el método auxiliar para obtener longitud
+                    'type': place.get_type(),      # Usa el método auxiliar para obtener tipo
+                    'priority': place.priority,
+                    'rating': place.rating,
+                    'image': place.image,
+                    'address': place.address
+                }
             else:
                 place_dict = place
             places_data.append(place_dict)
