@@ -45,16 +45,23 @@ class Settings(BaseSettings):
     MIN_TRAVEL_MIN: int = 8     # mínimo realista por traslado
     
     # Clustering geográfico y detección de traslados largos
-    CLUSTER_EPS_KM: float = 12.0        # Radio máximo para considerar lugares en la misma "zona/ciudad"
+    CLUSTER_EPS_KM_URBAN: float = 8.0   # Radio clustering en zonas urbanas densas
+    CLUSTER_EPS_KM_RURAL: float = 15.0  # Radio clustering en zonas rurales/turisticas
     CLUSTER_MIN_SAMPLES: int = 1        # Mínimo de lugares para formar un cluster
     WALK_MAX_KM: float = 2.0           # Máximo para caminar (>2km forzar auto/bus)
-    INTERCITY_THRESHOLD_KM: float = 30.0  # Umbral para considerar "traslado interurbano"
+    INTERCITY_THRESHOLD_KM_URBAN: float = 25.0   # Umbral intercity urbano
+    INTERCITY_THRESHOLD_KM_RURAL: float = 40.0   # Umbral intercity rural
     LONG_TRANSFER_MIN: int = 120       # Minutos para considerar un traslado "largo"
     
     # Velocidades para fallback cuando Google Directions falla
     WALK_KMH: float = 4.5              # Velocidad caminando
     DRIVE_KMH: float = 50.0            # Velocidad en auto (interurbano)
     TRANSIT_KMH: float = 35.0          # Velocidad transporte público
+    
+    # Políticas de transporte por distancia
+    WALK_THRESHOLD_KM: float = 2.0     # <= 2km: caminar OK
+    DRIVE_THRESHOLD_KM: float = 15.0   # > 15km: driving recomendado
+    TRANSIT_AVAILABLE: bool = True      # Si hay transporte público disponible
     
     class Config:
         env_file = ".env"

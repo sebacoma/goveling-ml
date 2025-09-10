@@ -175,6 +175,61 @@ class GoogleDirectionsService:
         logging.info(f"✅ Orden optimizado: {route_order}")
         return route_order
     
+    async def eta_between(
+        self,
+        origin: Tuple[float, float],
+        destination: Tuple[float, float], 
+        mode: str = "walking"
+    ) -> Dict:
+        """
+        🚀 Nueva función para ETAs reales entre puntos específicos
+        
+        Args:
+            origin: (lat, lon) punto de origen
+            destination: (lat, lon) punto de destino
+            mode: walk, drive, transit, bike
+            
+        Returns:
+            {
+                "duration_minutes": float,
+                "distance_km": float,
+                "recommended_mode": str,
+                "source": "google_api" | "fallback"
+            }
+        """
+        # Usar get_route_info como base
+        route_info = await self.get_route_info(origin, destination, mode)
+        
+        # Determinar modo recomendado basado en distancia
+        distance_km = route_info.get("distance_km", 0)
+        recommended_mode = self._decide_mode_by_distance(distance_km, mode)
+        
+        # Si el modo recomendado es diferente, recalcular
+        if recommended_mode != mode:
+            logging.info(f"🚗 Recalculando con modo recomendado: {mode} → {recommended_mode}")
+            route_info = await self.get_route_info(origin, destination, recommended_mode)
+        
+        return {
+            "duration_minutes": route_info.get("duration_minutes", 0),
+            "distance_km": route_info.get("distance_km", 0),
+            "recommended_mode": recommended_mode,
+            "source": "google_api" if route_info.get("google_enhanced", False) else "fallback",
+            "original_mode_requested": mode
+        }
+    
+    def _decide_mode_by_distance(self, distance_km: float, requested_mode: str) -> str:
+        """
+        🚗 Política de transporte por distancia
+        """
+        if distance_km <= settings.WALK_THRESHOLD_KM:
+            return "walk"
+        elif distance_km <= settings.DRIVE_THRESHOLD_KM and settings.TRANSIT_AVAILABLE:
+            # Para distancias medias, preferir transit si está disponible
+            return "transit" if requested_mode in ["walk", "transit"] else "drive"
+        else:
+            # Para distancias largas, forzar driving
+            return "drive"
+
     async def calculate_total_route_info(
         self,
         locations: List[Tuple[float, float]],

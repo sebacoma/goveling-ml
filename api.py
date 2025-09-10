@@ -134,8 +134,8 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 place_dict = place
             places_data.append(place_dict)
         
-        # Usar optimizador híbrido con detección automática
-        from utils.hybrid_optimizer import optimize_itinerary_hybrid
+        # Usar optimizador híbrido V3.0 reestructurado
+        from utils.hybrid_optimizer_new import optimize_itinerary_hybrid
         
         # Convertir fechas
         if isinstance(request.start_date, str):
@@ -191,7 +191,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             ])
             
         base_recommendations.extend([
-            f"Método híbrido: Haversine + Google Directions API",
+            f"Método híbrido V3.0: DBSCAN clustering + ETAs reales",
             f"{total_activities} actividades distribuidas en {len(days_data)} días",
             f"Score de eficiencia: {optimization_result.get('optimization_metrics', {}).get('efficiency_score', 0.9):.1%}",
             f"Tiempo total de viaje: {int(total_travel_minutes)} minutos"
@@ -199,6 +199,8 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         # 🚗 Añadir información sobre traslados largos detectados
         optimization_metrics = optimization_result.get('optimization_metrics', {})
+        clusters_info = optimization_result.get('clusters_info', {})
+        
         if optimization_metrics.get('long_transfers_detected', 0) > 0:
             transfer_count = optimization_metrics['long_transfers_detected']
             total_intercity_time = optimization_metrics.get('total_intercity_time_hours', 0)
@@ -207,40 +209,53 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             base_recommendations.extend([
                 f"🚗 {transfer_count} traslado(s) interurbano(s) detectado(s)",
                 f"📏 Distancia total entre ciudades: {total_intercity_distance:.0f}km", 
-                f"⏱️ Tiempo total de traslados largos: {total_intercity_time:.1f}h"
+                f"⏱️ Tiempo total de traslados largos: {total_intercity_time:.1f}h",
+                f"🏨 {clusters_info.get('total_clusters', 0)} zona(s) geográfica(s) identificada(s)"
             ])
+            
+            # Explicar separación de clusters
+            base_recommendations.append("🗺️ Clusters separados por distancia para evitar traslados imposibles el mismo día")
             
             # Añadir detalles de cada traslado si hay pocos
             if transfer_count <= 3 and 'intercity_transfers' in optimization_metrics:
                 for transfer in optimization_metrics['intercity_transfers']:
+                    mode_forced = "" if transfer.get('mode') == request.transport_mode else f" (modo forzado: {transfer.get('mode')})"
                     base_recommendations.append(
                         f"  • {transfer['from']} → {transfer['to']}: "
-                        f"{transfer['distance_km']:.0f}km (~{transfer['estimated_time_hours']:.1f}h)"
+                        f"{transfer['distance_km']:.0f}km (~{transfer['estimated_time_hours']:.1f}h){mode_forced}"
                     )
             
-            # Advertencia sobre modo de transporte si el usuario pidió caminar
+            # Advertencia sobre modo de transporte si se forzó cambio
             if request.transport_mode == 'walk':
                 base_recommendations.append(
-                    "⚠️ Algunos tramos exceden el límite para caminar. Se recomienda auto/bus para traslados largos."
+                    "⚠️ Modo de transporte cambiado automáticamente para traslados largos (walk → drive/transit)"
                 )
+            
+            # Información sobre hoteles recomendados
+            if clusters_info.get('recommended_hotels', 0) > 0:
+                base_recommendations.append(
+                    f"🏨 {clusters_info['recommended_hotels']} hotel(es) recomendado(s) automáticamente como base"
+                )
+        else:
+            base_recommendations.append("✅ Todos los lugares están en la misma zona geográfica")
         
         # Formatear respuesta para frontend simplificada
-        def format_place_for_frontend(activity, order):
-            """Convertir actividad interna a formato esperado por frontend"""
+        def format_activity_for_frontend(activity, order):
+            """Convertir ActivityItem a formato esperado por frontend"""
             import uuid
             return {
-                "id": str(uuid.uuid4()),  # Generar ID único
-                "name": activity.get("place", ""),
-                "category": activity.get("type", "point_of_interest"),
-                "rating": activity.get("rating", 4.5),  # Rating por defecto
-                "image": activity.get("image", ""),  # Placeholder para imagen
-                "description": f"Actividad en {activity.get('place', 'este lugar')}",
-                "estimated_time": f"{activity.get('duration_h', 1)}h",
-                "priority": activity.get("priority", 5),
-                "lat": activity.get("lat", 0),
-                "lng": activity.get("lon", 0),  # Frontend espera 'lng' no 'lon'
-                "recommended_duration": f"{activity.get('duration_h', 1)}h",
-                "best_time": f"{activity.get('start', '09:00')}-{activity.get('end', '10:00')}",
+                "id": str(uuid.uuid4()),
+                "name": activity.name,
+                "category": activity.place_type,
+                "rating": activity.rating if activity.rating else 4.5,
+                "image": activity.image if activity.image else "",
+                "description": f"Actividad en {activity.name}",
+                "estimated_time": f"{activity.duration_minutes/60:.1f}h",
+                "priority": activity.priority,
+                "lat": activity.lat,
+                "lng": activity.lon,  # Frontend espera 'lng'
+                "recommended_duration": f"{activity.duration_minutes/60:.1f}h",
+                "best_time": f"{activity.start_time//60:02d}:{activity.start_time%60:02d}-{activity.end_time//60:02d}:{activity.end_time%60:02d}",
                 "order": order
             }
         
@@ -249,16 +264,21 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         day_counter = 1
         
         for day in days_data:
-            # Convertir actividades
+            # Convertir actividades del nuevo formato
             frontend_places = []
             for idx, activity in enumerate(day.get("activities", []), 1):
-                frontend_place = format_place_for_frontend(activity, idx)
+                frontend_place = format_activity_for_frontend(activity, idx)
                 frontend_places.append(frontend_place)
             
-            # Calcular tiempos del día
-            total_activity_time = sum([act.get("duration_h", 1) for act in day.get("activities", [])])
-            travel_time_minutes = day.get("travel_summary", {}).get("total_travel_time_s", 0) // 60
-            walking_time = f"{int(travel_time_minutes)}min" if travel_time_minutes < 60 else f"{travel_time_minutes//60}h{travel_time_minutes%60}min"
+            # Calcular tiempos del día correctamente separados
+            total_activity_time = sum([act.duration_minutes for act in day.get("activities", [])])
+            travel_summary = day.get("travel_summary", {})
+            walking_time_min = travel_summary.get("walking_time_minutes", 0)
+            transport_time_min = travel_summary.get("transport_time_minutes", 0)
+            
+            walking_time = f"{int(walking_time_min)}min" if walking_time_min < 60 else f"{walking_time_min//60}h{walking_time_min%60}min"
+            transport_time = f"{int(transport_time_min)}min" if transport_time_min < 60 else f"{transport_time_min//60}h{transport_time_min%60}min"
+            
             free_minutes = day.get("free_minutes", 0)
             free_time = f"{int(free_minutes)}min" if free_minutes < 60 else f"{free_minutes//60}h{free_minutes%60}min"
             
@@ -269,13 +289,17 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 "day": day_counter,
                 "date": day.get("date", ""),
                 "places": frontend_places,
-                "total_time": f"{int(total_activity_time)}h",
+                "total_time": f"{int(total_activity_time/60)}h",
                 "walking_time": walking_time,
-                "transport_time": walking_time,  # Por ahora igual que walking_time
+                "transport_time": transport_time,  # Ahora separado correctamente
                 "free_time": free_time,
                 "is_suggested": is_suggested,
                 "is_tentative": False
             }
+            
+            # Añadir transfers si existen (opcional para frontend)
+            if day.get("transfers"):
+                day_data["transfers"] = day["transfers"]
             
             itinerary_days.append(day_data)
             day_counter += 1
