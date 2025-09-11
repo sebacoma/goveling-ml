@@ -718,9 +718,20 @@ class HybridOptimizerV31:
                     self.logger.warning(f"🌍 Context leakage evitado: current_location ({current_location}) → cluster_base ({cluster_location}) - distancia: {distance_to_cluster:.1f}km")
         
         # Generar free blocks con sugerencias mejoradas y recomendaciones procesables
-        free_blocks = await self._generate_free_blocks_enhanced(
+        free_blocks_objects = await self._generate_free_blocks_enhanced(
             current_time, daily_window.end, suggestions_origin
         )
+        
+        # Convertir objetos FreeBlock a diccionarios
+        free_blocks = []
+        for fb in free_blocks_objects:
+            free_blocks.append({
+                "start_time": fb.start_time,
+                "end_time": fb.end_time,
+                "duration_minutes": fb.duration_minutes,
+                "suggestions": fb.suggestions,
+                "note": fb.note
+            })
         
         # Generar recomendaciones procesables
         actionable_recommendations = self._generate_actionable_recommendations(
@@ -1468,13 +1479,31 @@ async def optimize_itinerary_hybrid_v31(
     # 5. Enhanced routing día por día
     days = []
     previous_end_location = None
+    last_active_base = None
     
     for date_str, assigned_clusters in day_assignments.items():
         if not assigned_clusters:
-            # Día libre con sugerencias
-            free_blocks = await optimizer._generate_free_blocks(
-                time_window.start, time_window.end, previous_end_location
+            # Día libre con sugerencias - usar ubicación del último día activo
+            effective_location = previous_end_location or last_active_base
+            
+            # Usar función enhanced para generar sugerencias reales
+            free_blocks_objects = await optimizer._generate_free_blocks_enhanced(
+                time_window.start, time_window.end, effective_location
             )
+            
+            # Convertir objetos FreeBlock a diccionarios
+            free_blocks = []
+            for fb in free_blocks_objects:
+                free_blocks.append({
+                    "start_time": fb.start_time,
+                    "end_time": fb.end_time,
+                    "duration_minutes": fb.duration_minutes,
+                    "suggestions": fb.suggestions,
+                    "note": fb.note
+                })
+            
+            # Base heredada del último día activo
+            inherited_base = last_active_base if last_active_base else None
             
             days.append({
                 "date": date_str,
@@ -1482,7 +1511,7 @@ async def optimize_itinerary_hybrid_v31(
                 "timeline": [],
                 "transfers": [],
                 "free_blocks": free_blocks,
-                "base": None,
+                "base": inherited_base,
                 "travel_summary": {
                     "total_travel_time_s": 0,
                     "total_distance_km": 0,
@@ -1500,6 +1529,10 @@ async def optimize_itinerary_hybrid_v31(
         )
         days.append(day_result)
         previous_end_location = day_result.get('end_location')
+        
+        # Actualizar la base del último día activo para herencia
+        if day_result.get('base'):
+            last_active_base = day_result['base']
     
     # 🌍 DETECCIÓN DE INTERCITY TRANSFERS ENTRE DÍAS
     await optimizer._inject_intercity_transfers_between_days(days)
