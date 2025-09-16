@@ -9,12 +9,13 @@ import asyncio
 from datetime import datetime, time as dt_time, timedelta
 import time as time_module
 
-from models.schemas_new import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
+from models.schemas import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
 from settings import settings
 from services.hotel_recommender import HotelRecommender
 from services.google_places_service import GooglePlacesService
 from utils.logging_config import setup_production_logging
 from utils.performance_cache import cache_result, hash_places
+from utils.hybrid_optimizer_v31 import HybridOptimizerV31
 
 # Configurar logging optimizado
 logger = setup_production_logging()
@@ -45,10 +46,8 @@ async def health_check():
         "version": "2.2.0"
     }
 
-from utils.performance_cache import cache_result, hash_places
-
 @app.post("/api/v2/itinerary/generate-hybrid", response_model=ItineraryResponse, tags=["Hybrid Optimizer"])
-@cache_result(ttl=300)  # 5 minutos de caché
+@cache_result(expiry_minutes=5)  # 5 minutos de caché
 async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
     """
     🚀 OPTIMIZADOR HÍBRIDO INTELIGENTE V3.1 ENHANCED - MÁXIMA ROBUSTEZ
