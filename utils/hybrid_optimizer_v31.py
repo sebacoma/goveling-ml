@@ -23,6 +23,7 @@ from utils.google_directions_service import GoogleDirectionsService
 from utils.geo_utils import haversine_km
 from services.hotel_recommender import HotelRecommender
 from services.google_places_service import GooglePlacesService
+from utils.google_cache import cache_google_api, parallel_google_calls
 from settings import settings
 
 @dataclass

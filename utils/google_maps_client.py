@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import json
 from settings import settings
+from .google_cache import cache_google_api, parallel_google_calls
 
 class GoogleMapsClient:
     """Cliente inteligente para APIs de Google Maps"""
@@ -22,6 +23,7 @@ class GoogleMapsClient:
         if self.session:
             await self.session.close()
     
+    @cache_google_api(ttl=3600)  # 1 hora de caché
     async def get_place_details(self, place_name: str, lat: float, lon: float) -> Dict[str, Any]:
         """Obtener detalles completos de un lugar usando Places API"""
         try:

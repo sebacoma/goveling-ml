@@ -9,14 +9,15 @@ import asyncio
 from datetime import datetime, time as dt_time, timedelta
 import time as time_module
 
-from models.schemas import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
+from models.schemas_new import Place, PlaceType, TransportMode, Coordinates, ItineraryRequest, ItineraryResponse, HotelRecommendationRequest, Activity
 from settings import settings
 from services.hotel_recommender import HotelRecommender
 from services.google_places_service import GooglePlacesService
+from utils.logging_config import setup_production_logging
+from utils.performance_cache import cache_result, hash_places
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Configurar logging optimizado
+logger = setup_production_logging()
 
 app = FastAPI(
     title="Goveling ML API",
@@ -44,7 +45,10 @@ async def health_check():
         "version": "2.2.0"
     }
 
+from utils.performance_cache import cache_result, hash_places
+
 @app.post("/api/v2/itinerary/generate-hybrid", response_model=ItineraryResponse, tags=["Hybrid Optimizer"])
+@cache_result(ttl=300)  # 5 minutos de caché
 async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
     """
     🚀 OPTIMIZADOR HÍBRIDO INTELIGENTE V3.1 ENHANCED - MÁXIMA ROBUSTEZ
@@ -119,7 +123,9 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 else:
                     place_dict = place
                 
-                logger.info(f"📍 Normalizando lugar {i}: {place_dict.get('name', 'sin nombre')}")
+                # Solo log esencial en producción
+                if settings.DEBUG:
+                    logger.info(f"📍 Normalizando lugar {i}: {place_dict.get('name', 'sin nombre')}")
                 
                 # Función helper para conversión segura
                 def safe_float(value, default=0.0):
