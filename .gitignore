@@ -73,14 +73,20 @@ node_modules/
 # pyenv
 .python-version
 
+# Test files (si no quieres subirlos)
+test_*.py
+debug_*.py
+
+# Development documentation
+ESTRUCTURA_FINAL.md
+PROYECTO_LIMPIO.md
+
 # Backup files
 *_backup.*
 api_backup.py
 api_clean.py
 api_simple.py
 
-# Test files (si no quieres subirlos)
-test_*.py
-
-# Vercel
-.vercel
+# Data files (if any)
+data/
+models/*.pkl
