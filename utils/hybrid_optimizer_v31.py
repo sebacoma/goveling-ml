@@ -1011,8 +1011,15 @@ class HybridOptimizerV31:
             )
             
             if best_start_time + activity_duration > daily_window.end:
-                self.logger.warning(f"    ⚠️ {place['name']} no cabe en el día")
-                break
+                self.logger.warning(f"    ⚠️ {place['name']} no cabe en el día - intentando sin time windows")
+                # Intentar programar sin restricciones de time windows
+                fallback_start = current_time
+                if fallback_start + activity_duration <= daily_window.end:
+                    self.logger.info(f"    ✅ {place['name']} programado sin time windows a las {fallback_start//60:02d}:{fallback_start%60:02d}")
+                    best_start_time = fallback_start
+                else:
+                    self.logger.warning(f"    ❌ {place['name']} realmente no cabe en el día")
+                    break
             
             # Crear actividad
             activity = ActivityItem(
@@ -1324,7 +1331,7 @@ class HybridOptimizerV31:
     # =========================================================================
     
     def allocate_clusters_to_days(self, clusters: List[Cluster], start_date: datetime, end_date: datetime) -> Dict[str, List[Cluster]]:
-        """Legacy method - sin cambios de V3.0"""
+        """Enhanced method - distribuye actividades inteligentemente"""
         num_days = (end_date - start_date).days + 1
         cluster_distances = self._calculate_inter_cluster_distances(clusters)
         intercity_threshold = self._get_intercity_threshold(clusters)
@@ -1337,54 +1344,74 @@ class HybridOptimizerV31:
             day_assignments[date_str] = []
             current_date += timedelta(days=1)
         
-        available_clusters = clusters.copy()
-        day_keys = list(day_assignments.keys())
-        
-        for day_idx, date_str in enumerate(day_keys):
-            if not available_clusters:
-                break
-            
-            if day_idx == 0:
-                chosen_cluster = available_clusters.pop(0)
-                day_assignments[date_str].append(chosen_cluster)
-                continue
-            
-            previous_clusters = []
-            for prev_day in day_keys[:day_idx]:
-                previous_clusters.extend(day_assignments[prev_day])
-            
-            compatible_cluster = None
-            for cluster in available_clusters:
-                is_compatible = True
+        # 🧠 NUEVA LÓGICA: Distribución inteligente por proximidad y tipo
+        for cluster in clusters:
+            if len(cluster.places) <= 1:
+                # Cluster pequeño - asignar completo
+                min_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
+                day_assignments[min_day].append(cluster)
+            else:
+                # Cluster grande - verificar proximidad y tipo
+                place_types = [p.get('type', '') for p in cluster.places]
                 
-                for prev_cluster in previous_clusters:
-                    distance_key = tuple(sorted([cluster.label, prev_cluster.label]))
-                    distance = cluster_distances.get(distance_key, 0)
+                if len(set(place_types)) == 1 and place_types[0] == 'restaurant':
+                    # Todos restaurantes - verificar si están cerca para agrupar
+                    max_intra_distance = self._calculate_max_intra_cluster_distance(cluster.places)
                     
-                    if distance > intercity_threshold:
-                        prev_date_idx = day_keys.index([k for k, v in day_assignments.items() if prev_cluster in v][0])
-                        if abs(day_idx - prev_date_idx) <= 1:
-                            is_compatible = False
-                            break
-                
-                if is_compatible:
-                    compatible_cluster = cluster
-                    break
-            
-            if compatible_cluster:
-                available_clusters.remove(compatible_cluster)
-                day_assignments[date_str].append(compatible_cluster)
-            elif available_clusters:
-                fallback_cluster = available_clusters.pop(0)
-                day_assignments[date_str].append(fallback_cluster)
-        
-        # Redistribuir clusters restantes
-        if available_clusters:
-            for cluster in available_clusters:
-                min_clusters_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
-                day_assignments[min_clusters_day].append(cluster)
+                    if max_intra_distance <= 5.0:  # Mismo barrio/zona (≤5km)
+                        self.logger.info(f"🍽️ {len(cluster.places)} restaurantes cercanos (max {max_intra_distance:.1f}km) - agrupando máximo 2 por día")
+                        day_keys = list(day_assignments.keys())
+                        
+                        # Agrupar máximo 2 restaurantes por día
+                        for i in range(0, len(cluster.places), 2):
+                            places_for_day = cluster.places[i:i+2]
+                            
+                            mini_cluster = Cluster(
+                                label=f"{cluster.label}_group_{i//2}",
+                                centroid=cluster.centroid,
+                                places=places_for_day,
+                                home_base=cluster.home_base
+                            )
+                            
+                            day_idx = (i//2) % len(day_keys)
+                            day_assignments[day_keys[day_idx]].append(mini_cluster)
+                    else:
+                        self.logger.info(f"🍽️ {len(cluster.places)} restaurantes dispersos (max {max_intra_distance:.1f}km) - distribuyendo 1 por día")
+                        day_keys = list(day_assignments.keys())
+                        
+                        for i, place in enumerate(cluster.places):
+                            # Crear mini-cluster para cada restaurante
+                            mini_cluster = Cluster(
+                                label=f"{cluster.label}_split_{i}",
+                                centroid=cluster.centroid,
+                                places=[place],
+                                home_base=cluster.home_base
+                            )
+                            
+                            day_idx = i % len(day_keys)
+                            day_assignments[day_keys[day_idx]].append(mini_cluster)
+                else:
+                    # Cluster mixto - asignar completo
+                    min_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
+                    day_assignments[min_day].append(cluster)
         
         return day_assignments
+    
+    def _calculate_max_intra_cluster_distance(self, places: List[Dict]) -> float:
+        """Calcular la distancia máxima entre lugares dentro del cluster"""
+        if len(places) <= 1:
+            return 0.0
+        
+        max_distance = 0.0
+        for i, place_a in enumerate(places):
+            for place_b in places[i+1:]:
+                distance = haversine_km(
+                    place_a['lat'], place_a['lon'],
+                    place_b['lat'], place_b['lon']
+                )
+                max_distance = max(max_distance, distance)
+        
+        return max_distance
     
     def _calculate_inter_cluster_distances(self, clusters: List[Cluster]) -> Dict[tuple, float]:
         """Calcular distancias entre clusters"""
