@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     
     # Sugerencias para días libres
     FREE_DAY_SUGGESTIONS_RADIUS_M: int = 3000
-    FREE_DAY_SUGGESTIONS_LIMIT: int = 6
+    FREE_DAY_SUGGESTIONS_LIMIT: int = 3  # Reducido de 6 a 3 para mejor UX
     
     class Config:
         env_file = ".env"

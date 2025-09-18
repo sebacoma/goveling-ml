@@ -1175,19 +1175,13 @@ class HybridOptimizerV31:
         )]
     
     def _select_types_by_duration(self, duration_minutes: int) -> List[str]:
-        """🕐 Seleccionar tipos de lugares según duración disponible"""
+        """🕐 Seleccionar exactamente 3 tipos de lugares según duración disponible"""
         if duration_minutes >= 240:  # ≥4h - actividades largas
-            return [
-                'tourist_attraction', 'point_of_interest', 'park', 
-                'natural_feature', 'museum', 'art_gallery'
-            ]
+            return ['tourist_attraction', 'restaurant', 'museum']
         elif duration_minutes >= 120:  # 2-4h - mezcla
-            return [
-                'restaurant', 'cafe', 'tourist_attraction', 
-                'shopping_mall', 'museum'
-            ]
+            return ['restaurant', 'tourist_attraction', 'cafe']
         else:  # <2h - actividades cortas
-            return ['restaurant', 'cafe', 'bakery']
+            return ['restaurant', 'cafe', 'bar']
     
     async def _enrich_suggestions(
         self, 

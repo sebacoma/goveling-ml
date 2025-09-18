@@ -14,7 +14,7 @@ class GooglePlacesService:
         lon: float, 
         types: List[str], 
         radius_m: int = 3000, 
-        limit: int = 6
+        limit: int = 3  # Cambiado de 6 a 3
     ) -> List[Dict]:
         """
         🔍 Búsqueda robusta de lugares cercanos con manejo de errores
@@ -45,37 +45,74 @@ class GooglePlacesService:
             return []
     
     def _generate_synthetic_suggestions(self, lat: float, lon: float, types: List[str], limit: int) -> List[Dict]:
-        """Generar sugerencias sintéticas cuando la API falla"""
+        """Generar exactamente 3 sugerencias sintéticas cuando la API falla"""
         synthetic_places = []
         
-        # Base de datos simple de sugerencias por tipo
+        # Base de datos simple de sugerencias por tipo (mejoradas)
         type_suggestions = {
-            'restaurant': ['Restaurante local', 'Café tradicional', 'Comida típica'],
+            'restaurant': ['Restaurante local', 'Lugar de comida típica', 'Bistró familiar'],
             'tourist_attraction': ['Sitio histórico', 'Mirador', 'Plaza principal'],
-            'museum': ['Museo regional', 'Centro cultural', 'Galería de arte'],
-            'park': ['Plaza central', 'Área verde', 'Parque urbano'],
-            'shopping_mall': ['Centro comercial', 'Mercado local', 'Tiendas']
+            'museum': ['Centro cultural', 'Galería de arte', 'Museo local'],
+            'park': ['Parque urbano', 'Plaza verde', 'Área recreativa'],
+            'shopping_mall': ['Centro comercial', 'Mercado local', 'Tiendas'],
+            'cafe': ['Café local', 'Lugar de café', 'Cafetería'],
+            'point_of_interest': ['Lugar de interés', 'Punto destacado', 'Sitio relevante']
         }
         
-        for i, place_type in enumerate(types):
-            if i >= limit:
-                break
-                
+        # Generar exactamente 3 sugerencias (o las que se soliciten, máximo 3)
+        max_suggestions = min(limit, 3)
+        
+        for i in range(max_suggestions):
+            place_type = types[i % len(types)]
             suggestions = type_suggestions.get(place_type, ['Lugar de interés'])
             name = suggestions[i % len(suggestions)]
             
+            # Coordenadas con offset pequeño para evitar solapamiento
+            offset_lat = lat + (i * 0.001)  # ~110 metros entre cada sugerencia
+            offset_lon = lon + (i * 0.001)
+            
+            # Calcular distancia aproximada
+            distance_km = self._calculate_distance(lat, lon, offset_lat, offset_lon)
+            eta_minutes = max(0, int(distance_km * 1000 / 83.33))  # 5 km/h walking speed
+            
+            # Rating progresivo
+            rating = round(4.0 + (i * 0.1), 1)  # 4.0, 4.1, 4.2
+            
             synthetic_places.append({
                 'name': name,
-                'lat': lat + (i * 0.001),  # Slight offset
-                'lon': lon + (i * 0.001),
+                'lat': offset_lat,
+                'lon': offset_lon,
                 'type': place_type,
-                'rating': 4.0 + (i * 0.1),
-                'eta_minutes': 5 + (i * 2),
-                'reason': 'Sugerencia basada en ubicación',
+                'rating': rating,
+                'eta_minutes': eta_minutes,
+                'reason': f"buen rating ({rating}⭐), {'muy cerca' if eta_minutes < 5 else 'cerca'}",
                 'synthetic': True
             })
         
         return synthetic_places
+    
+    def _calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Calcular distancia entre dos puntos usando fórmula haversine"""
+        import math
+        
+        # Radio de la Tierra en km
+        R = 6371.0
+        
+        # Convertir a radianes
+        lat1_rad = math.radians(lat1)
+        lon1_rad = math.radians(lon1)
+        lat2_rad = math.radians(lat2)
+        lon2_rad = math.radians(lon2)
+        
+        # Diferencias
+        dlat = lat2_rad - lat1_rad
+        dlon = lon2_rad - lon1_rad
+        
+        # Fórmula haversine
+        a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        
+        return R * c
         """
         Busca lugares cercanos usando Google Places API.
         
