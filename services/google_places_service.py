@@ -1,12 +1,14 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import logging
 import asyncio
 from utils.google_maps_client import GoogleMapsClient
+from settings import settings
 
 class GooglePlacesService:
     def __init__(self):
         self.maps_client = GoogleMapsClient()
         self.logger = logging.getLogger(__name__)
+        self.api_key = settings.GOOGLE_PLACES_API_KEY
     
     async def search_nearby(
         self, 
@@ -90,6 +92,178 @@ class GooglePlacesService:
             })
         
         return synthetic_places
+    
+    async def search_nearby_real(
+        self,
+        lat: float,
+        lon: float,
+        radius_m: int = 3000,
+        types: Optional[List[str]] = None,
+        limit: int = 3,
+        exclude_chains: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Buscar lugares reales cercanos usando Google Places API
+        """
+        try:
+            if not self.api_key:
+                self.logger.warning("🔑 No hay API key de Google Places - usando fallback")
+                return await self.search_nearby(lat, lon, types, radius_m, limit)
+            
+            # Configurar tipos de búsqueda (solo 3 principales)
+            place_types = types or ['restaurant', 'tourist_attraction', 'museum']
+            
+            all_places = []
+            
+            for place_type in place_types:
+                try:
+                    # Llamada a Google Places Nearby Search
+                    places_result = await self._google_nearby_search(
+                        lat=lat,
+                        lon=lon,
+                        radius=radius_m,
+                        type=place_type,
+                        limit=5  # Buscar más para poder filtrar
+                    )
+                    
+                    if places_result and 'results' in places_result:
+                        for place in places_result['results'][:1]:  # Solo 1 por tipo = 3 total
+                            processed_place = self._process_google_place(place, lat, lon)
+                            if processed_place and self._is_valid_suggestion(processed_place, exclude_chains):
+                                all_places.append(processed_place)
+                                
+                except Exception as e:
+                    self.logger.warning(f"Error searching {place_type}: {e}")
+                    continue
+            
+            # Si no hay resultados reales, usar fallback sintético
+            if not all_places:
+                self.logger.info("🔄 Sin resultados de Google Places - usando sugerencias sintéticas")
+                return await self.search_nearby(lat, lon, types, radius_m, limit)
+            
+            # Ordenar por rating y distancia
+            sorted_places = sorted(all_places, key=lambda x: (-x['rating'], x['eta_minutes']))
+            
+            return sorted_places[:limit]
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error en búsqueda nearby real: {e}")
+            return await self.search_nearby(lat, lon, types, radius_m, limit)
+
+    async def _google_nearby_search(
+        self,
+        lat: float,
+        lon: float,
+        radius: int,
+        type: str,
+        limit: int = 10
+    ) -> Optional[Dict[str, Any]]:
+        """Llamada real a Google Places Nearby Search API"""
+        try:
+            import aiohttp
+            
+            url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+            params = {
+                'location': f"{lat},{lon}",
+                'radius': radius,
+                'type': type,
+                'key': self.api_key,
+                'language': 'es'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get('status') == 'OK':
+                            self.logger.info(f"✅ Google Places: {len(data.get('results', []))} lugares encontrados para {type}")
+                            return data
+                        else:
+                            self.logger.warning(f"Google Places status: {data.get('status')} para {type}")
+                            return None
+                    else:
+                        self.logger.warning(f"Google Places HTTP error: {response.status}")
+                        return None
+                        
+        except Exception as e:
+            self.logger.error(f"Error en Google Places API: {e}")
+            return None
+
+    def _process_google_place(self, place: Dict[str, Any], origin_lat: float, origin_lon: float) -> Optional[Dict[str, Any]]:
+        """Procesar lugar de Google Places API"""
+        try:
+            location = place.get('geometry', {}).get('location', {})
+            lat = location.get('lat')
+            lon = location.get('lng')
+            
+            if not lat or not lon:
+                return None
+            
+            # Calcular distancia y ETA
+            distance_km = self._calculate_distance(origin_lat, origin_lon, lat, lon)
+            eta_minutes = int(distance_km * 1000 / 83.33)  # 5 km/h walking speed
+            
+            # Obtener tipo principal
+            place_types = place.get('types', [])
+            main_type = self._get_main_type(place_types)
+            
+            return {
+                'name': place.get('name', 'Lugar de interés'),
+                'lat': lat,
+                'lon': lon,
+                'type': main_type,
+                'rating': place.get('rating', 4.0),
+                'eta_minutes': eta_minutes,
+                'distance_km': distance_km,
+                'price_level': place.get('price_level'),
+                'user_ratings_total': place.get('user_ratings_total', 0),
+                'vicinity': place.get('vicinity', ''),
+                'place_id': place.get('place_id'),
+                'photos': place.get('photos', []),
+                'reason': f"Google Places: {place.get('rating', 4.0)}⭐, {eta_minutes}min caminando",
+                'synthetic': False,  # Lugar real
+                'source': 'google_places'
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error procesando lugar de Google: {e}")
+            return None
+
+    def _get_main_type(self, types: List[str]) -> str:
+        """Obtener el tipo principal de un lugar"""
+        priority_types = [
+            'restaurant', 'tourist_attraction', 'museum', 'park', 
+            'shopping_mall', 'cafe', 'bar', 'lodging', 'church'
+        ]
+        
+        for priority_type in priority_types:
+            if priority_type in types:
+                return priority_type
+        
+        return types[0] if types else 'point_of_interest'
+
+    def _is_valid_suggestion(self, place: Dict[str, Any], exclude_chains: bool = True) -> bool:
+        """Validar si un lugar es una buena sugerencia"""
+        try:
+            # Filtrar cadenas conocidas si se solicita
+            if exclude_chains:
+                chain_keywords = ['mcdonalds', 'kfc', 'burger king', 'subway', 'pizza hut', 'starbucks']
+                name_lower = place['name'].lower()
+                if any(chain in name_lower for chain in chain_keywords):
+                    return False
+            
+            # Validar rating mínimo
+            if place.get('rating', 0) < 3.5:
+                return False
+            
+            # Validar distancia máxima (5km)
+            if place.get('distance_km', 0) > 5:
+                return False
+            
+            return True
+            
+        except Exception:
+            return True
     
     def _calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calcular distancia entre dos puntos usando fórmula haversine"""

@@ -1121,20 +1121,23 @@ class HybridOptimizerV31:
                     # Seleccionar tipos según duración del bloque libre
                     types = self._select_types_by_duration(block_duration)
                     
-                    # Búsqueda robusta de lugares cercanos
-                    raw_suggestions = await self.places_service.search_nearby(
+                    # 🗺️ USAR GOOGLE PLACES API REAL para sugerencias cercanas al centroide
+                    raw_suggestions = await self.places_service.search_nearby_real(
                         lat=location[0],
                         lon=location[1], 
                         types=types,
                         radius_m=settings.FREE_DAY_SUGGESTIONS_RADIUS_M,
-                        limit=settings.FREE_DAY_SUGGESTIONS_LIMIT
+                        limit=settings.FREE_DAY_SUGGESTIONS_LIMIT,
+                        exclude_chains=True  # Excluir cadenas conocidas
                     )
                     
                     # Enriquecer sugerencias con ETAs y razones
-                    suggestions = await self._enrich_suggestions(raw_suggestions, location, block_duration)
+                    suggestions = await self._enrich_suggestions_real(raw_suggestions, location, block_duration)
                     
                     if suggestions:
-                        note = f"Sugerencias para {block_duration//60}h de tiempo libre"
+                        real_count = sum(1 for s in suggestions if not s.get('synthetic', True))
+                        source_type = f"{real_count} lugares reales" if real_count > 0 else "lugares sintéticos"
+                        note = f"Sugerencias para {block_duration//60}h de tiempo libre ({source_type})"
                     else:
                         note = "No se encontraron sugerencias cercanas"
                         
@@ -1233,6 +1236,93 @@ class HybridOptimizerV31:
                 continue
         
         return enriched
+
+    async def _enrich_suggestions_real(
+        self, 
+        raw_suggestions: List[Dict], 
+        user_location: Tuple[float, float],
+        block_duration: int
+    ) -> List[Dict]:
+        """💎 Enriquecer sugerencias reales de Google Places con ETAs y razones"""
+        enriched = []
+        max_distance_km = 5.0  # Máximo 5km desde la base del día
+        
+        for suggestion in raw_suggestions:
+            try:
+                # 🔍 FILTRO POR DISTANCIA: descartar sugerencias muy lejas de la base del día
+                distance_km = suggestion.get('distance_km', 0)
+                
+                if distance_km > max_distance_km:
+                    self.logger.debug(f"🚫 Sugerencia descartada: {suggestion['name']} ({distance_km:.1f}km > {max_distance_km}km)")
+                    continue
+                
+                # Si ya viene de Google Places, usar datos directamente
+                if not suggestion.get('synthetic', True):
+                    enriched.append({
+                        'name': suggestion['name'],
+                        'lat': suggestion['lat'],
+                        'lon': suggestion['lon'],
+                        'type': suggestion['type'],
+                        'rating': suggestion.get('rating', 4.0),
+                        'eta_minutes': suggestion.get('eta_minutes', 0),
+                        'reason': suggestion.get('reason', f"Google Places: {suggestion.get('rating', 4.0)}⭐"),
+                        'synthetic': False,
+                        'source': 'google_places',
+                        'place_id': suggestion.get('place_id', ''),
+                        'vicinity': suggestion.get('vicinity', '')
+                    })
+                else:
+                    # Sugerencia sintética - calcular ETA
+                    eta_info = await self.google_service.eta_between(
+                        user_location,
+                        (suggestion['lat'], suggestion['lon']),
+                        'walk'
+                    )
+                    
+                    reason = self._generate_suggestion_reason_enhanced(
+                        suggestion, eta_info['duration_minutes'], block_duration
+                    )
+                    
+                    enriched.append({
+                        'name': suggestion['name'],
+                        'lat': suggestion['lat'],
+                        'lon': suggestion['lon'],
+                        'type': suggestion['type'],
+                        'rating': suggestion.get('rating', 4.0),
+                        'eta_minutes': int(eta_info['duration_minutes']),
+                        'reason': reason,
+                        'synthetic': True
+                    })
+                    
+            except Exception as e:
+                self.logger.warning(f"Error enriqueciendo sugerencia {suggestion.get('name', 'unknown')}: {e}")
+                continue
+        
+        return enriched[:3]  # Máximo 3 sugerencias
+
+    def _generate_suggestion_reason_enhanced(self, suggestion: Dict, eta_minutes: int, block_duration: int) -> str:
+        """📝 Generar razón contextual mejorada para la sugerencia"""
+        rating = suggestion.get('rating', 4.0)
+        source = suggestion.get('source', 'synthetic')
+        
+        if eta_minutes <= 5:
+            distance_desc = "muy cerca"
+        elif eta_minutes <= 15:
+            distance_desc = "cerca"
+        else:
+            distance_desc = f"{eta_minutes}min caminando"
+        
+        if rating >= 4.5:
+            rating_desc = f"excelente rating ({rating}⭐)"
+        elif rating >= 4.0:
+            rating_desc = f"buen rating ({rating}⭐)"
+        else:
+            rating_desc = f"rating {rating}⭐"
+        
+        # Indicar si es lugar real o sintético
+        source_prefix = "Google Places: " if source == 'google_places' else ""
+        
+        return f"{source_prefix}{rating_desc}, {distance_desc}"
     
     def _generate_suggestion_reason(self, suggestion: Dict, eta_minutes: int, block_duration: int) -> str:
         """📝 Generar razón contextual para la sugerencia"""

@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     
     # External APIs
     GOOGLE_MAPS_API_KEY: Optional[str] = None
+    GOOGLE_PLACES_API_KEY: Optional[str] = os.getenv("GOOGLE_PLACES_API_KEY")
     OPENAI_API_KEY: Optional[str] = None
+    ENABLE_REAL_PLACES: bool = os.getenv("ENABLE_REAL_PLACES", "true").lower() == "true"
     
     # Business Logic
     MAX_DAILY_ACTIVITIES: int = 8
