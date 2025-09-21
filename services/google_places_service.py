@@ -100,18 +100,19 @@ class GooglePlacesService:
         radius_m: int = 3000,
         types: Optional[List[str]] = None,
         limit: int = 3,
-        exclude_chains: bool = True
+        exclude_chains: bool = True,
+        day_offset: int = 1
     ) -> List[Dict[str, Any]]:
         """
-        Buscar lugares reales cercanos usando Google Places API
+        Buscar lugares reales cercanos usando Google Places API con variedad por día
         """
         try:
             if not self.api_key:
                 self.logger.warning("🔑 No hay API key de Google Places - usando fallback")
-                return await self.search_nearby(lat, lon, types, radius_m, limit)
+                return await self._search_nearby_with_day_variety(lat, lon, types, radius_m, limit, day_offset)
             
-            # Configurar tipos de búsqueda (solo 3 principales)
-            place_types = types or ['restaurant', 'tourist_attraction', 'museum']
+            # Configurar tipos de búsqueda con rotación por día
+            place_types = self._get_types_for_day(types, day_offset)
             
             all_places = []
             
@@ -123,11 +124,16 @@ class GooglePlacesService:
                         lon=lon,
                         radius=radius_m,
                         type=place_type,
-                        limit=5  # Buscar más para poder filtrar
+                        limit=8  # Buscar más para poder filtrar y variar
                     )
                     
                     if places_result and 'results' in places_result:
-                        for place in places_result['results'][:1]:  # Solo 1 por tipo = 3 total
+                        # Usar day_offset para seleccionar diferentes resultados por día
+                        start_idx = (day_offset - 1) % min(len(places_result['results']), 3)
+                        
+                        for i, place in enumerate(places_result['results'][start_idx:]):
+                            if len(all_places) >= limit:
+                                break
                             processed_place = self._process_google_place(place, lat, lon)
                             if processed_place and self._is_valid_suggestion(processed_place, exclude_chains):
                                 all_places.append(processed_place)
@@ -136,19 +142,22 @@ class GooglePlacesService:
                     self.logger.warning(f"Error searching {place_type}: {e}")
                     continue
             
-            # Si no hay resultados reales, usar fallback sintético
+            # Si no hay resultados reales, usar fallback con variedad
             if not all_places:
-                self.logger.info("🔄 Sin resultados de Google Places - usando sugerencias sintéticas")
-                return await self.search_nearby(lat, lon, types, radius_m, limit)
+                self.logger.info("🔄 Sin resultados de Google Places - usando sugerencias sintéticas con variedad")
+                return await self._search_nearby_with_day_variety(lat, lon, types, radius_m, limit, day_offset)
             
-            # Ordenar por rating y distancia
-            sorted_places = sorted(all_places, key=lambda x: (-x['rating'], x['eta_minutes']))
+            # Ordenar por rating y distancia, pero agregar algo de randomización por día
+            import random
+            random.seed(day_offset * 42)  # Seed basado en día para consistencia
+            
+            sorted_places = sorted(all_places, key=lambda x: (-x['rating'] + random.uniform(-0.1, 0.1), x['eta_minutes']))
             
             return sorted_places[:limit]
             
         except Exception as e:
             self.logger.error(f"❌ Error en búsqueda nearby real: {e}")
-            return await self.search_nearby(lat, lon, types, radius_m, limit)
+            return await self._search_nearby_with_day_variety(lat, lon, types, radius_m, limit, day_offset)
 
     async def _google_nearby_search(
         self,
@@ -188,6 +197,132 @@ class GooglePlacesService:
         except Exception as e:
             self.logger.error(f"Error en Google Places API: {e}")
             return None
+
+    def _get_types_for_day(self, types: Optional[List[str]], day_offset: int) -> List[str]:
+        """Obtener tipos de lugares variados según el día"""
+        
+        # Rotación de tipos por día
+        type_rotations = {
+            1: ['tourist_attraction', 'restaurant', 'museum'],      # Día 1: Cultura + comida
+            2: ['park', 'cafe', 'shopping_mall'],                   # Día 2: Relax + compras  
+            3: ['church', 'art_gallery', 'restaurant'],             # Día 3: Historia + arte
+            4: ['amusement_park', 'zoo', 'aquarium'],              # Día 4: Entretenimiento
+            5: ['spa', 'gym', 'beauty_salon']                      # Día 5: Bienestar
+        }
+        
+        if types:
+            return types  # Si se especifican tipos, usarlos
+        
+        # Usar módulo para ciclar tipos si hay más de 5 días
+        day_index = ((day_offset - 1) % 5) + 1
+        return type_rotations.get(day_index, ['tourist_attraction', 'restaurant', 'museum'])
+
+    async def _search_nearby_with_day_variety(
+        self,
+        lat: float,
+        lon: float,
+        types: Optional[List[str]],
+        radius_m: int,
+        limit: int,
+        day_offset: int
+    ) -> List[Dict[str, Any]]:
+        """Fallback con variedad por día para lugares sintéticos"""
+        try:
+            # Usar tipos específicos por día
+            place_types = self._get_types_for_day(types, day_offset)
+            
+            suggestions = []
+            
+            # Nombres variados por día y tipo
+            name_variations = {
+                'restaurant': [
+                    ['Restaurante local', 'Bistró familiar', 'Lugar de comida típica'],
+                    ['Café gastronómico', 'Restaurante tradicional', 'Casa de comidas'],
+                    ['Parrilla local', 'Comida casera', 'Restaurante del barrio']
+                ],
+                'tourist_attraction': [
+                    ['Sitio histórico', 'Mirador', 'Plaza principal'],
+                    ['Monumento local', 'Punto panorámico', 'Lugar emblemático'],
+                    ['Atracción cultural', 'Sitio de interés', 'Lugar destacado']
+                ],
+                'museum': [
+                    ['Centro cultural', 'Galería de arte', 'Museo local'],
+                    ['Espacio cultural', 'Museo histórico', 'Centro de arte'],
+                    ['Galería local', 'Museo temático', 'Espacio expositivo']
+                ],
+                'park': [
+                    ['Parque urbano', 'Plaza verde', 'Área recreativa'],
+                    ['Espacio verde', 'Parque central', 'Zona natural'],
+                    ['Área de descanso', 'Parque local', 'Espacio público']
+                ],
+                'cafe': [
+                    ['Café local', 'Lugar de café', 'Cafetería'],
+                    ['Café artesanal', 'Casa de té', 'Espacio café'],
+                    ['Café urbano', 'Lugar de encuentro', 'Café típico']
+                ],
+                'shopping_mall': [
+                    ['Centro comercial', 'Mercado local', 'Tiendas'],
+                    ['Galería comercial', 'Plaza comercial', 'Centro de compras'],
+                    ['Mercado central', 'Zona comercial', 'Centro urbano']
+                ],
+                'church': [
+                    ['Iglesia histórica', 'Templo local', 'Basílica'],
+                    ['Capilla', 'Santuario', 'Iglesia colonial'],
+                    ['Catedral', 'Templo religioso', 'Iglesia antigua']
+                ],
+                'art_gallery': [
+                    ['Galería de arte', 'Espacio artístico', 'Centro de arte'],
+                    ['Galería local', 'Exposición artística', 'Espacio cultural'],
+                    ['Galería urbana', 'Centro creativo', 'Espacio de arte']
+                ]
+            }
+            
+            for i in range(limit):
+                place_type = place_types[i % len(place_types)]
+                
+                # Seleccionar variación según día
+                day_idx = (day_offset - 1) % 3
+                type_names = name_variations.get(place_type, [['Lugar de interés']])
+                if day_idx < len(type_names):
+                    available_names = type_names[day_idx]
+                else:
+                    available_names = type_names[0]
+                
+                name = available_names[i % len(available_names)]
+                
+                # Coordenadas con offset diferente por día
+                day_offset_factor = (day_offset - 1) * 0.003  # Más separación entre días
+                base_offset = i * 0.002
+                offset_lat = lat + base_offset + day_offset_factor
+                offset_lon = lon + base_offset + day_offset_factor
+                
+                # Calcular distancia y ETA
+                distance_km = self._calculate_distance(lat, lon, offset_lat, offset_lon)
+                eta_minutes = max(0, int(distance_km * 1000 / 83.33))
+                
+                # Rating progresivo variado por día
+                base_rating = 4.0 + (day_offset - 1) * 0.1
+                rating = round(base_rating + (i * 0.1), 1)
+                
+                suggestion = {
+                    'name': name,
+                    'lat': offset_lat,
+                    'lon': offset_lon,
+                    'type': place_type,
+                    'rating': min(rating, 5.0),
+                    'eta_minutes': eta_minutes,
+                    'reason': f"buen rating ({rating}⭐), {'muy cerca' if eta_minutes < 5 else 'cerca'}",
+                    'synthetic': True,
+                    'day_generated': day_offset
+                }
+                
+                suggestions.append(suggestion)
+            
+            return suggestions
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error generando sugerencias sintéticas con variedad: {e}")
+            return []
 
     def _process_google_place(self, place: Dict[str, Any], origin_lat: float, origin_lon: float) -> Optional[Dict[str, Any]]:
         """Procesar lugar de Google Places API"""

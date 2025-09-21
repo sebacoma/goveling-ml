@@ -46,6 +46,52 @@ async def health_check():
         "version": "2.2.0"
     }
 
+@app.get("/debug/suggestions")
+async def debug_suggestions(lat: float = -23.6521, lon: float = -70.3958, day: int = 1):
+    """Debug endpoint para probar sugerencias"""
+    try:
+        from services.google_places_service import GooglePlacesService
+        
+        places_service = GooglePlacesService()
+        
+        # Probar primero el método básico
+        basic_suggestions = await places_service.search_nearby(
+            lat=lat,
+            lon=lon,
+            types=['restaurant', 'tourist_attraction', 'museum'],
+            limit=3
+        )
+        
+        # Probar el método real con Google Places
+        real_suggestions = await places_service.search_nearby_real(
+            lat=lat,
+            lon=lon,
+            types=['restaurant', 'tourist_attraction', 'museum'],
+            limit=3,
+            day_offset=day
+        )
+        
+        return {
+            "location": {"lat": lat, "lon": lon},
+            "day": day,
+            "basic_suggestions": basic_suggestions,
+            "real_suggestions": real_suggestions,
+            "api_key_configured": bool(places_service.api_key),
+            "settings": {
+                "radius": settings.FREE_DAY_SUGGESTIONS_RADIUS_M,
+                "limit": settings.FREE_DAY_SUGGESTIONS_LIMIT,
+                "enable_real_places": settings.ENABLE_REAL_PLACES
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "error_type": str(e.__class__.__name__)
+        }
+
 @app.post("/api/v2/itinerary/generate-hybrid", response_model=ItineraryResponse, tags=["Hybrid Optimizer"])
 @cache_result(expiry_minutes=5)  # 5 minutos de caché
 async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):

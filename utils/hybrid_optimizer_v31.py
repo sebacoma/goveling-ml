@@ -606,7 +606,8 @@ class HybridOptimizerV31:
         assigned_clusters: List[Cluster],
         daily_window: TimeWindow,
         transport_mode: str,
-        previous_day_end_location: Optional[Tuple[float, float]] = None
+        previous_day_end_location: Optional[Tuple[float, float]] = None,
+        day_number: int = 1
     ) -> Dict:
         """🗓️ Routing mejorado con transfers con nombres reales"""
         self.logger.info(f"🗓️ Routing día {date} con {len(assigned_clusters)} clusters")
@@ -720,7 +721,7 @@ class HybridOptimizerV31:
         
         # Generar free blocks con sugerencias mejoradas y recomendaciones procesables
         free_blocks_objects = await self._generate_free_blocks_enhanced(
-            current_time, daily_window.end, suggestions_origin
+            current_time, daily_window.end, suggestions_origin, day_number
         )
         
         # Convertir objetos FreeBlock a diccionarios
@@ -1105,7 +1106,8 @@ class HybridOptimizerV31:
         self,
         current_time: int,
         day_end: int,
-        location: Optional[Tuple[float, float]]
+        location: Optional[Tuple[float, float]],
+        day_number: int = 1
     ) -> List[FreeBlock]:
         """🆓 Generar bloques libres con sugerencias inteligentes por duración"""
         free_blocks = []
@@ -1118,17 +1120,18 @@ class HybridOptimizerV31:
             
             if location and block_duration >= 60:  # Al menos 1 hora libre
                 try:
-                    # Seleccionar tipos según duración del bloque libre
-                    types = self._select_types_by_duration(block_duration)
+                    # Seleccionar tipos según duración del bloque libre Y día
+                    types = self._select_types_by_duration_and_day(block_duration, day_number)
                     
-                    # 🗺️ USAR GOOGLE PLACES API REAL para sugerencias cercanas al centroide
+                    # 🗺️ USAR GOOGLE PLACES API REAL con variedad por día
                     raw_suggestions = await self.places_service.search_nearby_real(
                         lat=location[0],
                         lon=location[1], 
                         types=types,
                         radius_m=settings.FREE_DAY_SUGGESTIONS_RADIUS_M,
                         limit=settings.FREE_DAY_SUGGESTIONS_LIMIT,
-                        exclude_chains=True  # Excluir cadenas conocidas
+                        exclude_chains=True,  # Excluir cadenas conocidas
+                        day_offset=day_number  # Nuevo parámetro para variedad
                     )
                     
                     # Enriquecer sugerencias con ETAs y razones
@@ -1185,6 +1188,32 @@ class HybridOptimizerV31:
             return ['restaurant', 'tourist_attraction', 'cafe']
         else:  # <2h - actividades cortas
             return ['restaurant', 'cafe', 'bar']
+
+    def _select_types_by_duration_and_day(self, duration_minutes: int, day_number: int) -> List[str]:
+        """🕐 Seleccionar tipos de lugares variando por día y duración"""
+        
+        # Definir rotación de tipos por día
+        type_rotations = {
+            1: ['tourist_attraction', 'restaurant', 'museum'],      # Día 1: Cultura + comida
+            2: ['park', 'cafe', 'shopping_mall'],                   # Día 2: Relax + compras  
+            3: ['church', 'art_gallery', 'restaurant'],             # Día 3: Historia + arte
+            4: ['amusement_park', 'zoo', 'aquarium'],              # Día 4: Entretenimiento
+            5: ['spa', 'gym', 'beauty_salon']                      # Día 5: Bienestar
+        }
+        
+        # Usar módulo para ciclar tipos si hay más de 5 días
+        day_index = ((day_number - 1) % 5) + 1
+        base_types = type_rotations.get(day_index, ['tourist_attraction', 'restaurant', 'museum'])
+        
+        # Ajustar según duración
+        if duration_minutes >= 480:  # 8+ horas - día completo
+            return base_types
+        elif duration_minutes >= 240:  # 4-8 horas - medio día  
+            return base_types[:2] + ['cafe']
+        elif duration_minutes >= 120:  # 2-4 horas - par de horas
+            return base_types[:2] + ['bar']
+        else:  # < 2 horas - tiempo corto
+            return ['cafe', 'restaurant', 'bar']
     
     async def _enrich_suggestions(
         self, 
@@ -1593,14 +1622,20 @@ async def optimize_itinerary_hybrid_v31(
     previous_end_location = None
     last_active_base = None
     
-    for date_str, assigned_clusters in day_assignments.items():
+    # Crear lista ordenada de fechas para tener índice de día
+    sorted_dates = sorted(day_assignments.keys())
+    
+    for day_index, date_str in enumerate(sorted_dates):
+        day_number = day_index + 1  # Día 1, 2, 3, etc.
+        assigned_clusters = day_assignments[date_str]
+        
         if not assigned_clusters:
             # Día libre con sugerencias - usar ubicación del último día activo
             effective_location = previous_end_location or last_active_base
             
-            # Usar función enhanced para generar sugerencias reales
+            # Usar función enhanced para generar sugerencias reales con variedad por día
             free_blocks_objects = await optimizer._generate_free_blocks_enhanced(
-                time_window.start, time_window.end, effective_location
+                time_window.start, time_window.end, effective_location, day_number
             )
             
             # Convertir objetos FreeBlock a diccionarios
@@ -1637,7 +1672,7 @@ async def optimize_itinerary_hybrid_v31(
             continue
         
         day_result = await optimizer.route_day_enhanced(
-            date_str, assigned_clusters, time_window, transport_mode, previous_end_location
+            date_str, assigned_clusters, time_window, transport_mode, previous_end_location, day_number
         )
         days.append(day_result)
         previous_end_location = day_result.get('end_location')
