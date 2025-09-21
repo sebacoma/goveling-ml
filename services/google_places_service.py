@@ -108,8 +108,8 @@ class GooglePlacesService:
         """
         try:
             if not self.api_key:
-                self.logger.warning("🔑 No hay API key de Google Places - usando fallback")
-                return await self._search_nearby_with_day_variety(lat, lon, types, radius_m, limit, day_offset)
+                self.logger.warning("🔑 No hay API key de Google Places - sin sugerencias (solo lugares de alta calidad)")
+                return []  # Sin API key no podemos validar calidad, así que no devolvemos nada
             
             # Configurar tipos de búsqueda con rotación por día
             place_types = self._get_types_for_day(types, day_offset)
@@ -142,10 +142,10 @@ class GooglePlacesService:
                     self.logger.warning(f"Error searching {place_type}: {e}")
                     continue
             
-            # Si no hay resultados reales, usar fallback con variedad
+            # Si no hay resultados reales de calidad, NO usar fallback sintético
             if not all_places:
-                self.logger.info("🔄 Sin resultados de Google Places - usando sugerencias sintéticas con variedad")
-                return await self._search_nearby_with_day_variety(lat, lon, types, radius_m, limit, day_offset)
+                self.logger.info("� Sin lugares que cumplan estándares de calidad (4.5⭐, 20+ reseñas) - no se generarán sugerencias")
+                return []  # Devolver lista vacía en lugar de fallback sintético
             
             # Ordenar por rating y distancia, pero agregar algo de randomización por día
             import random
@@ -157,7 +157,7 @@ class GooglePlacesService:
             
         except Exception as e:
             self.logger.error(f"❌ Error en búsqueda nearby real: {e}")
-            return await self._search_nearby_with_day_variety(lat, lon, types, radius_m, limit, day_offset)
+            return []  # En caso de error, no devolver sugerencias para mantener calidad
 
     async def _google_nearby_search(
         self,
@@ -378,27 +378,42 @@ class GooglePlacesService:
         return types[0] if types else 'point_of_interest'
 
     def _is_valid_suggestion(self, place: Dict[str, Any], exclude_chains: bool = True) -> bool:
-        """Validar si un lugar es una buena sugerencia"""
+        """Validar si un lugar es una buena sugerencia con filtros de calidad estrictos"""
         try:
-            # Filtrar cadenas conocidas si se solicita
+            # ⭐ FILTROS DE CALIDAD ESTRICTOS
+            
+            # 1. Rating mínimo: 4.5 estrellas
+            rating = place.get('rating', 0)
+            if rating < 4.5:
+                self.logger.debug(f"🚫 {place.get('name', 'Lugar')} descartado: rating {rating} < 4.5")
+                return False
+            
+            # 2. Número mínimo de reseñas: 20
+            user_ratings_total = place.get('user_ratings_total', 0)
+            if user_ratings_total < 20:
+                self.logger.debug(f"🚫 {place.get('name', 'Lugar')} descartado: {user_ratings_total} reseñas < 20")
+                return False
+            
+            # 3. Filtrar cadenas conocidas si se solicita
             if exclude_chains:
-                chain_keywords = ['mcdonalds', 'kfc', 'burger king', 'subway', 'pizza hut', 'starbucks']
+                chain_keywords = ['mcdonalds', 'kfc', 'burger king', 'subway', 'pizza hut', 'starbucks', 'dominos']
                 name_lower = place['name'].lower()
                 if any(chain in name_lower for chain in chain_keywords):
+                    self.logger.debug(f"🚫 {place.get('name', 'Lugar')} descartado: es una cadena")
                     return False
             
-            # Validar rating mínimo
-            if place.get('rating', 0) < 3.5:
-                return False
-            
-            # Validar distancia máxima (5km)
+            # 4. Validar distancia máxima (5km)
             if place.get('distance_km', 0) > 5:
+                self.logger.debug(f"🚫 {place.get('name', 'Lugar')} descartado: distancia {place.get('distance_km', 0):.1f}km > 5km")
                 return False
             
+            # ✅ Lugar válido con alta calidad
+            self.logger.debug(f"✅ {place.get('name', 'Lugar')} válido: {rating}⭐ ({user_ratings_total} reseñas)")
             return True
             
-        except Exception:
-            return True
+        except Exception as e:
+            self.logger.warning(f"Error validando sugerencia: {e}")
+            return False
     
     def _calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calcular distancia entre dos puntos usando fórmula haversine"""

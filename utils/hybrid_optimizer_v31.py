@@ -1139,10 +1139,15 @@ class HybridOptimizerV31:
                     
                     if suggestions:
                         real_count = sum(1 for s in suggestions if not s.get('synthetic', True))
-                        source_type = f"{real_count} lugares reales" if real_count > 0 else "lugares sintéticos"
-                        note = f"Sugerencias para {block_duration//60}h de tiempo libre ({source_type})"
+                        if real_count > 0:
+                            source_type = f"{real_count} lugares reales de alta calidad"
+                            note = f"Sugerencias para {block_duration//60}h de tiempo libre ({source_type})"
+                        else:
+                            # No hay lugares que cumplan los criterios de calidad
+                            suggestions = []
+                            note = "No hay lugares cercanos que cumplan nuestros estándares de calidad (4.5⭐, 20+ reseñas)"
                     else:
-                        note = "No se encontraron sugerencias cercanas"
+                        note = "No hay lugares cercanos que cumplan nuestros estándares de calidad (4.5⭐, 20+ reseñas)"
                         
                 except Exception as e:
                     self.logger.warning(f"Error generando sugerencias: {e}")
@@ -1298,7 +1303,10 @@ class HybridOptimizerV31:
                         'synthetic': False,
                         'source': 'google_places',
                         'place_id': suggestion.get('place_id', ''),
-                        'vicinity': suggestion.get('vicinity', '')
+                        'vicinity': suggestion.get('vicinity', ''),
+                        'user_ratings_total': suggestion.get('user_ratings_total', 0),  # Agregado campo de reseñas
+                        'distance_km': suggestion.get('distance_km', 0),
+                        'price_level': suggestion.get('price_level')
                     })
                 else:
                     # Sugerencia sintética - calcular ETA
