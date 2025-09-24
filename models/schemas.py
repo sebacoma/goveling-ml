@@ -171,7 +171,7 @@ class Activity(BaseModel):
     coordinates: Coordinates
 
 class ItineraryRequest(BaseModel):
-    places: List[Place] = Field(..., min_items=1, max_items=50)
+    places: List[Place] = Field(..., min_items=0, max_items=50)  # 🆕 Permitir días libres (min_items=0)
     start_date: Union[date, str]
     end_date: Union[date, str]
     transport_mode: Union[TransportMode, str] = TransportMode.WALK

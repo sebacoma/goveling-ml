@@ -1606,30 +1606,28 @@ class HybridOptimizerV31:
             return ['restaurant', 'cafe', 'bar']
 
     def _select_types_by_duration_and_day(self, duration_minutes: int, day_number: int) -> List[str]:
-        """🕐 Seleccionar tipos de lugares variando por día y duración"""
+        """🕐 Seleccionar tipos simples: SIEMPRE una atracción turística + variedad"""
         
-        # Definir rotación de tipos por día
-        type_rotations = {
-            1: ['tourist_attraction', 'restaurant', 'museum'],      # Día 1: Cultura + comida
-            2: ['park', 'cafe', 'shopping_mall'],                   # Día 2: Relax + compras  
-            3: ['church', 'art_gallery', 'restaurant'],             # Día 3: Historia + arte
-            4: ['amusement_park', 'zoo', 'aquarium'],              # Día 4: Entretenimiento
-            5: ['spa', 'gym', 'beauty_salon']                      # Día 5: Bienestar
-        }
+        # 🎯 ENFOQUE SIMPLE: Siempre incluir atracciones turísticas + variedad por día
+        variety_types = ['cafe', 'restaurant', 'museum', 'park', 'point_of_interest', 'art_gallery']
         
-        # Usar módulo para ciclar tipos si hay más de 5 días
-        day_index = ((day_number - 1) % 5) + 1
-        base_types = type_rotations.get(day_index, ['tourist_attraction', 'restaurant', 'museum'])
+        # Rotar el segundo y tercer tipo según el día para variedad
+        day_index = (day_number - 1) % len(variety_types)
+        secondary_type = variety_types[day_index]
+        tertiary_type = variety_types[(day_index + 1) % len(variety_types)]
         
-        # Ajustar según duración
+        # SIEMPRE incluir tourist_attraction como primer tipo
+        base_types = ['tourist_attraction', secondary_type, tertiary_type]
+        
+        # Ajustar según duración (pero siempre con tourist_attraction)
         if duration_minutes >= 480:  # 8+ horas - día completo
             return base_types
         elif duration_minutes >= 240:  # 4-8 horas - medio día  
-            return base_types[:2] + ['cafe']
+            return base_types[:2]  # tourist_attraction + 1 más
         elif duration_minutes >= 120:  # 2-4 horas - par de horas
-            return base_types[:2] + ['bar']
+            return ['tourist_attraction', 'cafe']  # Básico: atracción + café
         else:  # < 2 horas - tiempo corto
-            return ['cafe', 'restaurant', 'bar']
+            return ['tourist_attraction', 'cafe']  # Básico también
     
     async def _enrich_suggestions(
         self, 
@@ -1965,6 +1963,124 @@ class HybridOptimizerV31:
         """Determinar umbral intercity"""
         return settings.INTERCITY_THRESHOLD_KM_RURAL if len(clusters) > 3 else settings.INTERCITY_THRESHOLD_KM_URBAN
 
+    async def _generate_free_days_with_suggestions(
+        self, 
+        start_date: datetime, 
+        end_date: datetime, 
+        daily_start_hour: int = 9, 
+        daily_end_hour: int = 18
+    ) -> Dict:
+        """
+        🆕 Generar días completamente libres con sugerencias automáticas
+        """
+        from services.google_places_service import GooglePlacesService
+        
+        places_service = GooglePlacesService()
+        
+        # Calcular ubicación por defecto (centro de Chile para búsquedas generales)
+        default_lat, default_lon = -33.4489, -70.6693  # Santiago como centro
+        
+        days_dict = {}
+        total_days = (end_date - start_date).days + 1
+        
+        logging.info(f"🏖️ Generando {total_days} días libres con sugerencias")
+        
+        for i in range(total_days):
+            current_date = start_date + timedelta(days=i)
+            date_key = current_date.strftime('%Y-%m-%d')
+            day_number = i + 1
+            
+            # Tiempo total disponible por día
+            daily_minutes = (daily_end_hour - daily_start_hour) * 60
+            
+            # Generar sugerencias para este día con variedad inteligente
+            try:
+                # 🎯 DETECTAR TIPO DE DESTINO para sugerir tipos relevantes
+                tourist_destinations = {
+                    'san_pedro_atacama': (-22.91, -68.20, ['tourist_attraction', 'cafe', 'point_of_interest']),
+                    'valparaiso': (-33.05, -71.62, ['art_gallery', 'museum', 'tourist_attraction']),
+                    'santiago': (-33.45, -70.67, ['restaurant', 'museum', 'park']),
+                    'antofagasta': (-23.65, -70.40, ['tourist_attraction', 'restaurant', 'cafe']),
+                    'calama': (-22.49, -68.90, ['restaurant', 'shopping_mall', 'cafe']),
+                }
+                
+                # Determinar tipos según ubicación
+                suggested_types = None
+                for dest_name, (dest_lat, dest_lon, dest_types) in tourist_destinations.items():
+                    # Si estamos cerca de un destino conocido (dentro de ~50km)
+                    distance = ((default_lat - dest_lat)**2 + (default_lon - dest_lon)**2)**0.5
+                    if distance < 0.5:  # ~50km aproximadamente
+                        suggested_types = dest_types
+                        logging.info(f"🏛️ Detectado destino turístico: {dest_name.replace('_', ' ').title()}")
+                        break
+                
+                # Si no detectamos destino específico, usar variedad general
+                if not suggested_types:
+                    suggested_types = ['tourist_attraction', 'restaurant', 'cafe', 'museum', 'park']
+                
+                suggestions = await places_service.search_nearby_real(
+                    lat=default_lat,
+                    lon=default_lon,
+                    types=suggested_types,
+                    limit=6,  # Más sugerencias para días libres
+                    day_offset=day_number
+                )
+                
+                # Fallback a sugerencias sintéticas si no hay reales
+                if not suggestions:
+                    suggestions = await places_service.search_nearby(
+                        lat=default_lat,
+                        lon=default_lon,
+                        types=['restaurant', 'tourist_attraction', 'museum'],
+                        limit=3
+                    )
+                    
+            except Exception as e:
+                logging.warning(f"Error generando sugerencias para día {day_number}: {e}")
+                suggestions = []
+            
+            # Crear bloque libre completo con sugerencias
+            free_block = {
+                "start_time": daily_start_hour * 60,
+                "end_time": daily_end_hour * 60,
+                "duration_minutes": daily_minutes,
+                "suggestions": suggestions,
+                "note": f"Día libre completo con {len(suggestions)} sugerencias de lugares para explorar"
+            }
+            
+            # Estructura del día libre
+            days_dict[date_key] = {
+                "day": day_number,
+                "date": date_key,
+                "activities": [],  # Sin actividades programadas
+                "transfers": [],   # Sin transfers
+                "free_blocks": [free_block],  # Un gran bloque libre con sugerencias
+                "base": None,      # Sin hotel base asignado
+                "travel_summary": {
+                    "total_travel_time_s": 0,
+                    "walking_time_minutes": 0,
+                    "transport_time_minutes": 0,
+                    "intercity_transfers_count": 0,
+                }
+            }
+            
+            logging.info(f"📅 Día {day_number}: {len(suggestions)} sugerencias generadas")
+        
+        return {
+            "days": days_dict,
+            "optimization_metrics": {
+                "efficiency_score": 1.0,  # Máxima eficiencia para días libres
+                "optimization_mode": "free_days_with_suggestions",
+                "fallback_active": False,
+                "total_clusters": 0,
+                "total_activities": 0,
+                "total_distance_km": 0,
+                "total_travel_time_minutes": 0,
+                "processing_time_seconds": 0.1,
+                "free_days_generated": total_days
+            }
+        }
+
 # =========================================================================
 # MAIN FUNCTION V3.1
 # =========================================================================
@@ -1995,37 +2111,11 @@ async def optimize_itinerary_hybrid_v31(
     # 1. Clustering POIs
     clusters = optimizer.cluster_pois(places)
     if not clusters:
-        # 🔒 NUNCA retornar None/estructura parcial - crear estructura completa
-        empty_days = {}
-        for i in range((end_date - start_date).days + 1):
-            date_key = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
-            empty_days[date_key] = {
-                "day": i + 1,
-                "date": date_key,
-                "activities": [],
-                "transfers": [],
-                "free_blocks": [],
-                "base": None,
-                "travel_summary": {
-                    "total_travel_time_s": 0,
-                    "walking_time_minutes": 0,
-                    "transport_time_minutes": 0,
-                    "intercity_transfers_count": 0,
-                }
-            }
-        
-        return {
-            "days": empty_days,
-            "optimization_metrics": {
-                "efficiency_score": 0.1,
-                "optimization_mode": "emergency_empty",
-                "error": "No se pudieron crear clusters",
-                "fallback_active": True,
-                "total_clusters": 0,
-                "total_activities": 0,
-                "total_intercity_distance_km": 0
-            }
-        }
+        # 🆕 DÍAS COMPLETAMENTE LIBRES CON SUGERENCIAS AUTOMÁTICAS
+        logging.info("🏖️ Generando días libres con sugerencias automáticas")
+        return await optimizer._generate_free_days_with_suggestions(
+            start_date, end_date, daily_start_hour, daily_end_hour
+        )
     
     # 2. Enhanced home base assignment
     clusters = await optimizer.assign_home_base_to_clusters(clusters, accommodations, places)

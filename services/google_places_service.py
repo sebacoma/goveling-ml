@@ -157,8 +157,13 @@ class GooglePlacesService:
             
             # Configurar tipos de búsqueda con rotación por día
             place_types = self._get_types_for_day(types, day_offset)
+            self.logger.info(f"🎯 DÍA {day_offset}: Tipos solicitados={types}, Tipos finales={place_types}")
             
             all_places = []
+            
+            # 🎯 GARANTIZAR ATRACCIONES TURÍSTICAS PRIMERO
+            tourist_places = []
+            other_places = []
             
             for place_type in place_types:
                 try:
@@ -176,28 +181,43 @@ class GooglePlacesService:
                         start_idx = (day_offset - 1) % min(len(places_result['results']), 3)
                         
                         for i, place in enumerate(places_result['results'][start_idx:]):
-                            if len(all_places) >= limit:
-                                break
                             processed_place = self._process_google_place(place, lat, lon)
                             if processed_place and self._is_valid_suggestion(processed_place, exclude_chains):
-                                all_places.append(processed_place)
+                                # 🎯 Separar por tipo para garantizar atracciones turísticas
+                                if place_type == 'tourist_attraction':
+                                    tourist_places.append(processed_place)
+                                else:
+                                    other_places.append(processed_place)
                                 
                 except Exception as e:
                     self.logger.warning(f"Error searching {place_type}: {e}")
                     continue
             
-            # Si no hay resultados reales de calidad, NO usar fallback sintético
-            if not all_places:
-                self.logger.info("� Sin lugares que cumplan estándares de calidad (4.5⭐, 20+ reseñas) - no se generarán sugerencias")
-                return []  # Devolver lista vacía en lugar de fallback sintético
+            # 🎯 COMBINAR RESULTADOS: PRIORIZAR ATRACCIONES TURÍSTICAS
+            final_places = []
             
-            # Ordenar por rating y distancia, pero agregar algo de randomización por día
-            import random
-            random.seed(day_offset * 42)  # Seed basado en día para consistencia
+            # Primero agregar atracciones turísticas (al menos 1 si existe)
+            if tourist_places:
+                import random
+                random.seed(day_offset * 42)  # Seed basado en día para consistencia
+                sorted_tourist = sorted(tourist_places, key=lambda x: (-x['rating'] + random.uniform(-0.1, 0.1), x['eta_minutes']))
+                final_places.extend(sorted_tourist[:2])  # Máximo 2 atracciones turísticas
             
-            sorted_places = sorted(all_places, key=lambda x: (-x['rating'] + random.uniform(-0.1, 0.1), x['eta_minutes']))
+            # Luego agregar otros tipos para variedad
+            if other_places:
+                import random
+                random.seed(day_offset * 73)  # Seed diferente para otros tipos
+                sorted_others = sorted(other_places, key=lambda x: (-x['rating'] + random.uniform(-0.1, 0.1), x['eta_minutes']))
+                remaining_slots = limit - len(final_places)
+                final_places.extend(sorted_others[:remaining_slots])
             
-            return sorted_places[:limit]
+            # Si no hay resultados reales de calidad, devolver vacío
+            if not final_places:
+                self.logger.info("🚫 Sin lugares que cumplan estándares de calidad (4.5⭐, 20+ reseñas)")
+                return []
+            
+            self.logger.info(f"✅ Retornando {len(final_places)} sugerencias (🏛️ {len([p for p in final_places if p.get('type') == 'tourist_attraction'])} atracciones)")
+            return final_places[:limit]
             
         except Exception as e:
             self.logger.error(f"❌ Error en búsqueda nearby real: {e}")
@@ -243,23 +263,18 @@ class GooglePlacesService:
             return None
 
     def _get_types_for_day(self, types: Optional[List[str]], day_offset: int) -> List[str]:
-        """Obtener tipos de lugares variados según el día"""
-        
-        # Rotación de tipos por día
-        type_rotations = {
-            1: ['tourist_attraction', 'restaurant', 'museum'],      # Día 1: Cultura + comida
-            2: ['park', 'cafe', 'shopping_mall'],                   # Día 2: Relax + compras  
-            3: ['church', 'art_gallery', 'restaurant'],             # Día 3: Historia + arte
-            4: ['amusement_park', 'zoo', 'aquarium'],              # Día 4: Entretenimiento
-            5: ['spa', 'gym', 'beauty_salon']                      # Día 5: Bienestar
-        }
+        """Obtener tipos simples: SIEMPRE tourist_attraction + variedad"""
         
         if types:
-            return types  # Si se especifican tipos, usarlos
+            return types  # Si se especifican tipos específicos, usarlos
         
-        # Usar módulo para ciclar tipos si hay más de 5 días
-        day_index = ((day_offset - 1) % 5) + 1
-        return type_rotations.get(day_index, ['tourist_attraction', 'restaurant', 'museum'])
+        # 🎯 ENFOQUE SIMPLE: Siempre tourist_attraction + variedad por día
+        variety_types = ['cafe', 'restaurant', 'museum', 'park', 'point_of_interest']
+        day_index = (day_offset - 1) % len(variety_types)
+        secondary_type = variety_types[day_index]
+        
+        # SIEMPRE incluir tourist_attraction como primer tipo
+        return ['tourist_attraction', secondary_type, 'cafe']
 
     async def _search_nearby_with_day_variety(
         self,
