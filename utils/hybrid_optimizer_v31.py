@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn.cluster import DBSCAN
 
-from utils.google_directions_service import GoogleDirectionsService
+from utils.free_routing_service import FreeRoutingService
 from utils.geo_utils import haversine_km
 from services.hotel_recommender import HotelRecommender
 from services.google_places_service import GooglePlacesService
@@ -77,7 +77,7 @@ class FreeBlock:
 
 class HybridOptimizerV31:
     def __init__(self):
-        self.google_service = GoogleDirectionsService()
+        self.routing_service = FreeRoutingService()
         self.hotel_recommender = HotelRecommender()
         self.places_service = GooglePlacesService()
         self.logger = logging.getLogger(__name__)
@@ -776,11 +776,11 @@ class HybridOptimizerV31:
         Genera intercity_transfer cuando distancia > 30km con ETA por velocidad promedio
         """
         
-        # 🗺️ Intentar Google Directions primero
+        # 🗺️ Intentar routing service gratuito
         try:
-            eta_info = await self.google_service.eta_between(origin, destination, transport_mode)
+            eta_info = await self.routing_service.eta_between(origin, destination, transport_mode)
         except Exception as e:
-            self.logger.warning(f"⚠️ Google Directions falló: {e} - usando fallback ETA")
+            self.logger.warning(f"⚠️ Routing service falló: {e} - usando fallback ETA")
             # 📊 Fallback ETA con velocidad promedio
             from utils.geo_utils import haversine_km
             distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
@@ -864,10 +864,10 @@ class HybridOptimizerV31:
             if distance_km > 30:
                 self.logger.info(f"🌍 Intercity transfer detectado: {curr_base['name']} → {next_base['name']} ({distance_km:.1f}km)")
                 
-                # Intentar ETA con Google Directions
+                # Intentar ETA con routing service gratuito
                 transfer_mode = "drive"
                 try:
-                    eta_info = await self.google_service.eta_between(
+                    eta_info = await self.routing_service.eta_between(
                         (curr_base['lat'], curr_base['lon']),
                         (next_base['lat'], next_base['lon']),
                         transfer_mode
@@ -986,7 +986,7 @@ class HybridOptimizerV31:
             
             # Transfer si es necesario
             if current_location != place_location:
-                eta_info = await self.google_service.eta_between(
+                eta_info = await self.routing_service.eta_between(
                     current_location, place_location, transport_mode
                 )
                 
@@ -1243,7 +1243,7 @@ class HybridOptimizerV31:
                     continue
                 
                 # Calcular ETA real
-                eta_info = await self.google_service.eta_between(
+                eta_info = await self.routing_service.eta_between(
                     user_location,
                     (suggestion['lat'], suggestion['lon']),
                     'walk'
@@ -1310,7 +1310,7 @@ class HybridOptimizerV31:
                     })
                 else:
                     # Sugerencia sintética - calcular ETA
-                    eta_info = await self.google_service.eta_between(
+                    eta_info = await self.routing_service.eta_between(
                         user_location,
                         (suggestion['lat'], suggestion['lon']),
                         'walk'

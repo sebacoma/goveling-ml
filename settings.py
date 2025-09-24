@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     ENABLE_REAL_PLACES: bool = os.getenv("ENABLE_REAL_PLACES", "true").lower() == "true"
     
+    # Free Routing APIs (alternativas gratuitas a Google Directions)
+    OPENROUTE_API_KEY: Optional[str] = os.getenv('OPENROUTE_API_KEY', None)  # Obtener clave gratuita en openrouteservice.org
+    FREE_ROUTING_TIMEOUT: int = 8  # segundos
+    ROUTING_FALLBACK_BUFFER_URBAN: float = 1.4  # 40% buffer en ciudades
+    ROUTING_FALLBACK_BUFFER_RURAL: float = 1.2  # 20% buffer en zonas rurales
+    
     # Business Logic
     MAX_DAILY_ACTIVITIES: int = 8
     MAX_WALKING_DISTANCE_KM: float = 15.0
