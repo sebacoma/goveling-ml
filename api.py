@@ -514,47 +514,54 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     base_recommendations.append(f"🚗 Transfers: {', '.join(intercity_transfers)}")
         
         # Formatear respuesta para frontend simplificada
+        def get_value(activity, key, default=None):
+            """Helper para obtener valor tanto de objetos como diccionarios"""
+            if isinstance(activity, dict):
+                return activity.get(key, default)
+            else:
+                return getattr(activity, key, default)
+        
         def format_activity_for_frontend(activity, order):
             """Convertir ActivityItem o IntercityActivity a formato esperado por frontend"""
             import uuid
             
             # Detectar si es una actividad intercity
-            is_intercity = getattr(activity, 'is_intercity_activity', False) or getattr(activity, 'type', '') == 'intercity_activity'
+            is_intercity = get_value(activity, 'is_intercity_activity', False) or get_value(activity, 'type', '') == 'intercity_activity'
             
             if is_intercity:
                 # Formateo especial para actividades intercity
                 return {
                     "id": str(uuid.uuid4()),
-                    "name": getattr(activity, 'name', 'Viaje intercity'),
+                    "name": get_value(activity, 'name', 'Viaje intercity'),
                     "category": "intercity_transfer",
                     "rating": 0.0,
                     "image": "",
-                    "description": getattr(activity, 'description', 'Viaje entre ciudades'),
-                    "estimated_time": f"{getattr(activity, 'duration_minutes', 0)/60:.1f}h",
+                    "description": get_value(activity, 'description', 'Viaje entre ciudades'),
+                    "estimated_time": f"{get_value(activity, 'duration_minutes', 0)/60:.1f}h",
                     "priority": 0,
-                    "lat": getattr(activity, 'lat', 0.0),
-                    "lng": getattr(activity, 'lon', 0.0),
-                    "recommended_duration": f"{getattr(activity, 'duration_minutes', 0)/60:.1f}h",
-                    "best_time": f"{getattr(activity, 'start_time', 0)//60:02d}:{getattr(activity, 'start_time', 0)%60:02d}-{getattr(activity, 'end_time', 0)//60:02d}:{getattr(activity, 'end_time', 0)%60:02d}",
+                    "lat": get_value(activity, 'lat', 0.0),
+                    "lng": get_value(activity, 'lon', 0.0),
+                    "recommended_duration": f"{get_value(activity, 'duration_minutes', 0)/60:.1f}h",
+                    "best_time": f"{get_value(activity, 'start_time', 0)//60:02d}:{get_value(activity, 'start_time', 0)%60:02d}-{get_value(activity, 'end_time', 0)//60:02d}:{get_value(activity, 'end_time', 0)%60:02d}",
                     "order": order,
-                    "transport_mode": getattr(activity, 'transport_mode', 'drive'),
+                    "transport_mode": get_value(activity, 'transport_mode', 'drive'),
                     "is_intercity": True
                 }
             else:
-                # Formateo normal para POIs con getattr para campos opcionales
+                # Formateo normal para POIs - ahora compatible con dicts y objetos
                 return {
                     "id": str(uuid.uuid4()),
-                    "name": getattr(activity, 'name', 'Lugar sin nombre'),
-                    "category": getattr(activity, 'place_type', getattr(activity, 'type', 'point_of_interest')),
-                    "rating": getattr(activity, 'rating', 4.5) or 4.5,
-                    "image": getattr(activity, 'image', ''),
-                    "description": getattr(activity, 'description', f"Actividad en {getattr(activity, 'name', 'lugar')}"),
-                    "estimated_time": f"{getattr(activity, 'duration_minutes', 60)/60:.1f}h",
-                    "priority": getattr(activity, 'priority', 5),
-                    "lat": getattr(activity, 'lat', 0.0),
-                    "lng": getattr(activity, 'lon', 0.0),  # Frontend espera 'lng'
-                    "recommended_duration": f"{getattr(activity, 'duration_minutes', 60)/60:.1f}h",
-                    "best_time": f"{getattr(activity, 'start_time', 0)//60:02d}:{getattr(activity, 'start_time', 0)%60:02d}-{getattr(activity, 'end_time', 0)//60:02d}:{getattr(activity, 'end_time', 0)%60:02d}",
+                    "name": get_value(activity, 'name', 'Lugar sin nombre'),
+                    "category": get_value(activity, 'place_type', get_value(activity, 'type', 'point_of_interest')),
+                    "rating": get_value(activity, 'rating', 4.5) or 4.5,
+                    "image": get_value(activity, 'image', ''),
+                    "description": get_value(activity, 'description', f"Actividad en {get_value(activity, 'name', 'lugar')}"),
+                    "estimated_time": f"{get_value(activity, 'duration_minutes', 60)/60:.1f}h",
+                    "priority": get_value(activity, 'priority', 5),
+                    "lat": get_value(activity, 'lat', 0.0),
+                    "lng": get_value(activity, 'lon', 0.0),  # Frontend espera 'lng'
+                    "recommended_duration": f"{get_value(activity, 'duration_minutes', 60)/60:.1f}h",
+                    "best_time": f"{get_value(activity, 'start_time', 0)//60:02d}:{get_value(activity, 'start_time', 0)%60:02d}-{get_value(activity, 'end_time', 0)//60:02d}:{get_value(activity, 'end_time', 0)%60:02d}",
                     "order": order,
                     "is_intercity": False
                 }

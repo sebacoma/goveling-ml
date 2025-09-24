@@ -181,3 +181,26 @@ class FreeRoutingService:
                 self.logger.debug(f"🔧 Velocidad ajustada de {implied_speed_kmh:.1f} a {target_speed:.1f} km/h")
         
         return result
+    
+    async def get_distance_km(
+        self,
+        origin_lat: float,
+        origin_lon: float,
+        dest_lat: float,
+        dest_lon: float,
+        transport_mode: str = 'drive'
+    ) -> Optional[float]:
+        """
+        📏 Obtener solo la distancia entre dos puntos
+        """
+        try:
+            result = await self.eta_between(
+                (origin_lat, origin_lon),
+                (dest_lat, dest_lon),
+                transport_mode
+            )
+            return result.get('distance_km') if result else None
+        except Exception as e:
+            self.logger.debug(f"Error obteniendo distancia: {e}")
+            # Fallback a distancia haversine
+            return haversine_km(origin_lat, origin_lon, dest_lat, dest_lon)

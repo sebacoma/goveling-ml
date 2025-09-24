@@ -39,6 +39,7 @@ class Cluster:
     home_base: Optional[Dict] = None
     home_base_source: str = "none"
     suggested_accommodations: List[Dict] = field(default_factory=list)
+    additional_suggestions: List[Dict] = field(default_factory=list)  # 🌟 Sugerencias adicionales para clusters remotos
 
 @dataclass
 class TransferItem:
@@ -50,6 +51,7 @@ class TransferItem:
     recommended_mode: str = "walk"
     is_intercity: bool = False
     overnight: bool = False
+    is_return_to_hotel: bool = False  # Nueva bandera para marcar regreso al hotel
 
 @dataclass
 class ActivityItem:
@@ -163,17 +165,62 @@ class HybridOptimizerV31:
     async def assign_home_base_to_clusters(
         self, 
         clusters: List[Cluster], 
-        accommodations: Optional[List[Dict]] = None
+        accommodations: Optional[List[Dict]] = None,
+        all_places: Optional[List[Dict]] = None
     ) -> List[Cluster]:
-        """🏨 Asignar home_base y generar sugerencias de alojamiento"""
+        """
+        🏨 ASIGNAR HOME BASE INTELIGENTE:
+        1. Buscar accommodations en la lista original de lugares (NO en clusters)
+        2. Usar accommodations del usuario si se proporcionan  
+        3. Recomendar hoteles para clusters sin accommodation
+        """
         self.logger.info(f"🏨 Asignando home_base a {len(clusters)} clusters")
         
-        if accommodations:
-            clusters = self._assign_user_hotels_to_clusters(clusters, accommodations)
-        else:
-            clusters = await self._recommend_hotels_for_clusters(clusters)
+        # 🧠 ESTABLECER CONTEXTO PARA DETECCIÓN DE CLUSTERS REMOTOS
+        self._all_clusters_for_remote_detection = clusters
         
-        # Generar sugerencias adicionales para cada cluster
+        # 1. Primero, extraer accommodations de la lista ORIGINAL de lugares (not from clusters)
+        all_accommodations = []
+        if all_places:
+            all_accommodations = [
+                place for place in all_places 
+                if place.get('place_type') == 'accommodation' or place.get('type') == 'accommodation'
+            ]
+            self.logger.info(f"🏨 Accommodations encontradas en lugares originales: {len(all_accommodations)}")
+            
+            # Para cada accommodation, asignarla al cluster más cercano
+            for accommodation in all_accommodations:
+                closest_cluster = None
+                min_distance = float('inf')
+                
+                for cluster in clusters:
+                    # Calcular distancia del accommodation al centroide del cluster
+                    distance = haversine_km(
+                        accommodation['lat'], accommodation['lon'],
+                        cluster.centroid[0], cluster.centroid[1]
+                    )
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_cluster = cluster
+                
+                # Asignar accommodation al cluster más cercano si no tiene base aún
+                if closest_cluster and not closest_cluster.home_base:
+                    closest_cluster.home_base = accommodation.copy()
+                    closest_cluster.home_base_source = "auto_detected_in_original_places"
+                    self.logger.info(f"  ✅ Cluster {closest_cluster.label}: {accommodation['name']} (detectado en lugares originales, distancia: {min_distance:.1f}km)")
+        
+        # 2. Asignar accommodations del usuario a clusters sin base
+        if accommodations:
+            clusters_without_base = [c for c in clusters if not c.home_base]
+            self._assign_user_hotels_to_clusters(clusters_without_base, accommodations)
+        
+        # 3. Recomendar hoteles para clusters que aún no tienen base
+        clusters_without_base = [c for c in clusters if not c.home_base]
+        if clusters_without_base:
+            self.logger.info(f"🤖 Recomendando hoteles para {len(clusters_without_base)} clusters sin accommodation")
+            await self._recommend_hotels_for_clusters(clusters_without_base)
+        
+        # 4. Generar sugerencias adicionales para cada cluster
         for cluster in clusters:
             await self._generate_accommodation_suggestions(cluster)
         
@@ -202,9 +249,13 @@ class HybridOptimizerV31:
         return clusters
     
     async def _recommend_hotels_for_clusters(self, clusters: List[Cluster]) -> List[Cluster]:
-        """Recomendar hoteles para cada cluster"""
+        """
+        🏨 RECOMENDACIÓN INTELIGENTE DE HOTELES:
+        Para clusters lejanos, recomendar alojamiento local + sugerencias adicionales
+        """
         for cluster in clusters:
             try:
+                # Primero intentar con el hotel recommender
                 recommendations = self.hotel_recommender.recommend_hotels(
                     cluster.places, max_recommendations=1, price_preference="mid"
                 )
@@ -220,14 +271,174 @@ class HybridOptimizerV31:
                         'type': 'accommodation'
                     }
                     cluster.home_base_source = "recommended"
+                    
+                    # 🧠 LÓGICA INTELIGENTE: Si es cluster lejano, agregar sugerencias adicionales
+                    await self._enrich_remote_cluster_with_local_attractions(cluster)
+                    
                 else:
-                    self._set_fallback_base(cluster)
+                    # 🏨 PARA CLUSTERS REMOTOS: Buscar hoteles con Google Places
+                    is_remote = await self._is_remote_cluster(cluster)
+                    if is_remote:
+                        await self._find_hotel_for_remote_cluster(cluster)
+                    else:
+                        self._set_fallback_base(cluster)
+                    
+                    # 🧠 ENRIQUECER INCLUSO SIN HOTEL RECOMENDADO (para clusters remotos)
+                    await self._enrich_remote_cluster_with_local_attractions(cluster)
                     
             except Exception as e:
                 self.logger.error(f"Error recomendando hotel: {e}")
                 self._set_fallback_base(cluster)
+                # 🧠 ENRIQUECER INCLUSO CON ERROR
+                await self._enrich_remote_cluster_with_local_attractions(cluster)
         
         return clusters
+    
+    async def _enrich_remote_cluster_with_local_attractions(self, cluster: Cluster):
+        """
+        🌟 ENRIQUECIMIENTO INTELIGENTE: 
+        Para clusters lejanos, buscar atracciones locales adicionales
+        """        
+        try:
+            # Usar el centroide del cluster como punto de búsqueda
+            search_location = cluster.centroid
+            
+            # 🧠 DETECCIÓN DE CLUSTER REMOTO: Verificar si hay otros clusters lejos
+            is_remote_cluster = await self._is_remote_cluster(cluster)
+            
+            if not is_remote_cluster:
+                self.logger.debug(f"🔍 Cluster {cluster.label} no es remoto - saltando enriquecimiento")
+                return
+            
+            self.logger.info(f"🔍 CLUSTER REMOTO DETECTADO: Buscando atracciones adicionales cerca del centroide {search_location}")
+            
+            # Buscar lugares adicionales en el área
+            additional_suggestions = []
+            place_types_to_search = ['tourist_attraction', 'restaurant', 'museum', 'park']
+            
+            for place_type in place_types_to_search:
+                try:
+                    # Usar Google Places para encontrar atracciones locales
+                    local_places = await self.places_service.search_nearby(
+                        lat=search_location[0],
+                        lon=search_location[1],
+                        types=[place_type],
+                        radius_m=10000,  # 10km de radio para clusters remotos
+                        limit=3
+                    )
+                    
+                    self.logger.info(f"🔍 Tipo: {place_type} - Encontrados: {len(local_places)} lugares")
+                    
+                    for place in local_places[:2]:  # Solo top 2 por tipo
+                        # Evitar duplicar lugares que ya están en el cluster
+                        place_name = place.get('name', '')
+                        if not any(existing['name'] == place_name for existing in cluster.places):
+                            additional_suggestions.append({
+                                'name': place_name,
+                                'lat': place.get('lat', search_location[0]),
+                                'lon': place.get('lon', search_location[1]),
+                                'place_type': place_type,
+                                'rating': place.get('rating', 4.0),
+                                'suggestion_type': 'local_discovery',
+                                'reason': f'Atracción adicional cerca de {place_name}',
+                                'address': place.get('address', 'Dirección no disponible')
+                            })
+                            self.logger.info(f"  ➕ Agregado: {place_name} (⭐{place.get('rating', 4.0)})")
+                        else:
+                            self.logger.info(f"  ⏭️ Duplicado: {place_name} - ya está en cluster")
+                            
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Error buscando {place_type}: {e}")
+                    continue
+            
+            # Agregar sugerencias al cluster
+            if additional_suggestions:
+                cluster.additional_suggestions = additional_suggestions
+                self.logger.info(f"✅ {len(additional_suggestions)} atracciones adicionales encontradas para cluster remoto")
+                
+                # Log de las sugerencias encontradas
+                for suggestion in additional_suggestions[:3]:
+                    self.logger.info(f"   💡 {suggestion['name']} ({suggestion['place_type']})")
+            else:
+                self.logger.info(f"ℹ️ No se encontraron atracciones adicionales para cluster remoto")
+                    
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error enriqueciendo cluster remoto: {e}")
+    
+    async def _is_remote_cluster(self, target_cluster: Cluster) -> bool:
+        """
+        🧠 LÓGICA DE DETECCIÓN DE CLUSTER REMOTO:
+        Un cluster es remoto si está a > 50km de cualquier otro cluster
+        """
+        if not hasattr(self, '_all_clusters_for_remote_detection'):
+            return True  # Si no tenemos contexto, asumir que es remoto para ser conservador
+        
+        try:
+            for other_cluster in self._all_clusters_for_remote_detection:
+                if other_cluster.label == target_cluster.label:
+                    continue
+                
+                # Calcular distancia entre centroides
+                distance_km = await self.routing_service.get_distance_km(
+                    target_cluster.centroid[0], target_cluster.centroid[1],
+                    other_cluster.centroid[0], other_cluster.centroid[1]
+                )
+                
+                if distance_km and distance_km < 50:  # 50km threshold
+                    self.logger.debug(f"🔍 Cluster {target_cluster.label} está cerca de cluster {other_cluster.label} ({distance_km:.1f}km)")
+                    return False
+            
+            self.logger.info(f"🌍 Cluster {target_cluster.label} es REMOTO (>50km de otros clusters)")
+            return True
+            
+        except Exception as e:
+            self.logger.warning(f"Error detectando cluster remoto: {e}")
+            return False  # Si hay error, no enriquecer
+    
+    async def _find_hotel_for_remote_cluster(self, cluster: Cluster):
+        """
+        🏨 BUSCAR HOTEL REAL PARA CLUSTER REMOTO:
+        Usar Google Places para encontrar hoteles cerca del cluster
+        """
+        try:
+            search_location = cluster.centroid
+            self.logger.info(f"🏨 Buscando hoteles reales cerca de {search_location}")
+            
+            # Buscar hoteles usando Google Places API REAL (no sintético)
+            hotels = await self.places_service.search_nearby_real(
+                lat=search_location[0],
+                lon=search_location[1],
+                radius_m=15000,  # 15km de radio para áreas remotas
+                types=['lodging'],  # Tipo específico para hoteles
+                limit=5,
+                exclude_chains=False  # Incluir cadenas hoteleras
+            )
+            
+            if hotels:
+                # Seleccionar el mejor hotel basado en rating
+                best_hotel = max(hotels, key=lambda h: h.get('rating', 0))
+                
+                cluster.home_base = {
+                    'name': best_hotel.get('name', 'Hotel local'),
+                    'lat': best_hotel.get('lat', search_location[0]),
+                    'lon': best_hotel.get('lon', search_location[1]),
+                    'address': best_hotel.get('address', 'Dirección no disponible'),
+                    'rating': best_hotel.get('rating', 4.0),
+                    'type': 'accommodation',
+                    'place_id': best_hotel.get('place_id', ''),
+                    'price_level': best_hotel.get('price_level', 2)
+                }
+                cluster.home_base_source = "google_places_hotel"
+                
+                self.logger.info(f"✅ Hotel encontrado para cluster remoto: {best_hotel.get('name')} (⭐{best_hotel.get('rating', 4.0)})")
+                
+            else:
+                self.logger.warning(f"⚠️ No se encontraron hoteles para cluster remoto, usando fallback")
+                self._set_fallback_base(cluster)
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error buscando hotel para cluster remoto: {e}")
+            self._set_fallback_base(cluster)
     
     async def _generate_accommodation_suggestions(self, cluster: Cluster):
         """Generar Top-3 sugerencias de alojamiento por cluster"""
@@ -416,7 +627,7 @@ class HybridOptimizerV31:
         """Normalizar y completar campos nulos de un lugar"""
         normalized = {
             'place_id': place.get('place_id', f"unknown_{hash(place.get('name', 'unnamed'))}"),
-            'name': place.get('name', 'Lugar sin nombre'),
+            'name': self._generate_smart_name(place),
             'lat': place.get('lat', 0.0),
             'lon': place.get('lon', 0.0),
             'category': place.get('category', place.get('type', 'general')),
@@ -440,6 +651,90 @@ class HybridOptimizerV31:
             normalized['opening_hours'] = {}
             
         return normalized
+    
+    def _generate_smart_name(self, place: Dict) -> str:
+        """Generar nombre inteligente basado en el tipo de lugar/actividad"""
+        # Si ya tiene nombre válido, usarlo
+        existing_name = place.get('name', '')
+        if existing_name and existing_name != '' and 'sin nombre' not in existing_name.lower():
+            return existing_name
+        
+        # Para transfers, generar nombres descriptivos
+        place_type = place.get('type', '')
+        category = place.get('category', '')
+        
+        # IMPORTANTE: Detectar transfers por type O category
+        if place_type == 'transfer' or category == 'transfer':
+            # Obtener información del transfer
+            duration_minutes = place.get('duration_minutes', 0)
+            distance_km = place.get('distance_km', 0)
+            from_place = place.get('from_place', '')
+            to_place = place.get('to_place', '')
+            is_return_to_hotel = place.get('is_return_to_hotel', False)
+            
+            # Generar nombre específico según contexto
+            if is_return_to_hotel:
+                return "Regreso al hotel"
+            elif to_place and to_place != '':
+                if duration_minutes >= 180:  # 3+ horas (intercity)
+                    return f"Viaje a {to_place} ({duration_minutes//60}h)"
+                elif duration_minutes >= 30:  # 30+ minutos
+                    return f"Traslado a {to_place} ({duration_minutes}min)"
+                elif distance_km > 5:  # 5+ km
+                    return f"Traslado a {to_place} ({distance_km:.0f}km)"
+                else:
+                    return f"Traslado a {to_place}"
+            elif from_place and from_place != '':
+                return f"Traslado desde {from_place}"
+            elif duration_minutes >= 180:  # Transfer largo sin destino específico
+                return f"Traslado largo ({duration_minutes//60}h)"
+            elif duration_minutes >= 30:
+                return f"Traslado ({duration_minutes}min)"
+            elif distance_km > 5:
+                return f"Traslado ({distance_km:.0f}km)"
+            elif duration_minutes > 0:
+                return f"Traslado corto ({duration_minutes}min)"
+            else:
+                return "Traslado"
+        
+        # Para otros tipos sin nombre
+        type_names = {
+            'restaurant': 'Restaurante',
+            'tourist_attraction': 'Atracción turística', 
+            'museum': 'Museo',
+            'park': 'Parque',
+            'accommodation': 'Alojamiento',
+            'shopping_mall': 'Centro comercial',
+            'cafe': 'Café',
+            'church': 'Iglesia',
+            'hotel': 'Hotel',
+            'lodging': 'Hotel'
+        }
+        
+        return type_names.get(place_type, 'Lugar de interés')
+    
+    def _transfer_item_to_dict(self, transfer_item: TransferItem) -> Dict:
+        """Convertir TransferItem a diccionario normalizado"""
+        # Crear diccionario base con información del transfer
+        transfer_dict = {
+            'place_id': f"transfer_{hash(str(transfer_item.from_place) + str(transfer_item.to_place))}",
+            'type': 'transfer',
+            'category': 'transfer',
+            'from_place': transfer_item.from_place,
+            'to_place': transfer_item.to_place, 
+            'distance_km': transfer_item.distance_km,
+            'duration_minutes': transfer_item.duration_minutes,
+            'recommended_mode': transfer_item.recommended_mode,
+            'is_intercity': transfer_item.is_intercity,
+            'is_return_to_hotel': getattr(transfer_item, 'is_return_to_hotel', False),
+            'rating': 4.5,  # Rating por defecto para transfers
+            'priority': 5,
+            'lat': 0.0,  # Los transfers no tienen ubicación específica
+            'lon': 0.0
+        }
+        
+        # Aplicar normalización para generar nombre inteligente
+        return self._normalize_place_fields(transfer_dict)
         
     def _classify_transport_time(self, travel_minutes: float) -> Dict[str, float]:
         """Clasificar tiempo de transporte entre walking y transport"""
@@ -619,6 +914,46 @@ class HybridOptimizerV31:
         current_time = daily_window.start
         current_location = previous_day_end_location
         
+        # NUEVO: Para el primer día, agregar transfer inicial desde el hotel
+        if day_number == 1 and current_location and assigned_clusters:
+            # Crear objeto de actividad de check-in similar a IntercityActivity
+            from dataclasses import dataclass
+            
+            @dataclass
+            class HotelActivity:
+                type: str = "accommodation"
+                name: str = ""
+                lat: float = 0.0
+                lon: float = 0.0
+                place_type: str = ""
+                duration_minutes: int = 0
+                start_time: int = 0
+                end_time: int = 0
+                description: str = ""
+                rating: float = 0.0
+                address: str = ""
+                
+            # Agregar actividad de check-in o llegada al hotel
+            hotel_activity = HotelActivity(
+                type="accommodation",
+                name="Check-in al hotel",
+                lat=current_location[0],
+                lon=current_location[1], 
+                place_type="hotel",
+                duration_minutes=30,
+                start_time=current_time,
+                end_time=current_time + 30,
+                description="Llegada y check-in al hotel base",
+                rating=4.5,
+                address="Hotel base del viaje"
+            )
+            
+            timeline.append(hotel_activity)
+            activities_scheduled.append(hotel_activity)
+            current_time += 30  # Tiempo para check-in
+            
+            self.logger.info(f"🏨 Primer día - agregando check-in al hotel ({current_time//60:02d}:{current_time%60:02d})")
+        
         # Métricas separadas
         walking_time = 0
         transport_time = 0
@@ -629,53 +964,64 @@ class HybridOptimizerV31:
         for cluster in assigned_clusters:
             # Transfer inter-cluster con nombres reales + actividad intercity
             if current_location and cluster.home_base:
-                transfer = await self._build_enhanced_transfer(
-                    current_location,
-                    (cluster.home_base['lat'], cluster.home_base['lon']),
-                    transport_mode,
-                    cluster
+                # Verificar si ya estamos en la ubicación del hotel base
+                hotel_location = (cluster.home_base['lat'], cluster.home_base['lon'])
+                
+                # Calcular distancia entre ubicación actual y hotel
+                distance = haversine_km(
+                    current_location[0], current_location[1], 
+                    hotel_location[0], hotel_location[1]
                 )
                 
-                # Verificar si cabe en el día
-                if current_time + transfer.duration_minutes > daily_window.end:
-                    transfer.overnight = True
-                    self.logger.warning(f"  ⚠️ Transfer intercity marcado como overnight")
-                    # En el próximo día empezará con este transfer
-                    break
-                
-                if transfer.duration_minutes > 0:
-                    timeline.append(transfer)
+                # Solo generar transfer si la distancia es significativa (>100m)
+                if distance > 0.1:  # 0.1 km = 100 metros
+                    transfer = await self._build_enhanced_transfer(
+                        current_location,
+                        hotel_location,
+                        transport_mode,
+                        cluster
+                    )
                     
-                    # Crear actividad intercity si es viaje largo
-                    intercity_activity = self._create_intercity_activity(transfer, current_time)
-                    if intercity_activity:
-                        timeline.append(intercity_activity)
-                        activities_scheduled.append(intercity_activity)
+                    # Verificar si cabe en el día
+                    if current_time + transfer.duration_minutes > daily_window.end:
+                        transfer.overnight = True
+                        self.logger.warning(f"  ⚠️ Transfer intercity marcado como overnight")
+                        # En el próximo día empezará con este transfer
+                        break
                     
-                    transfers.append({
-                        "type": "intercity_transfer",
-                        "from": transfer.from_place,
-                        "to": transfer.to_place,
-                        "distance_km": transfer.distance_km,
-                        "duration_minutes": transfer.duration_minutes,
-                        "mode": transfer.recommended_mode,
-                        "time": f"{current_time//60:02d}:{current_time%60:02d}",
-                        "overnight": transfer.overnight,
-                        "has_activity": intercity_activity is not None
-                    })
-                    
-                    current_time += transfer.duration_minutes
-                    total_distance += transfer.distance_km
-                    
-                    # Clasificar por tipo
-                    if transfer.is_intercity:
+                    if transfer.duration_minutes > 0:
+                        # Convertir TransferItem a dict normalizado
+                        transfer_dict = self._transfer_item_to_dict(transfer)
+                        timeline.append(transfer_dict)
+                        
+                        # Crear actividad intercity si es viaje largo
+                        intercity_activity = self._create_intercity_activity(transfer, current_time)
+                        if intercity_activity:
+                            timeline.append(intercity_activity)
+                            activities_scheduled.append(intercity_activity)
+                        
+                        transfers.append({
+                            "type": "intercity_transfer",
+                            "from": transfer.from_place,
+                            "to": transfer.to_place,
+                            "distance_km": transfer.distance_km,
+                            "duration_minutes": transfer.duration_minutes,
+                            "mode": transfer.recommended_mode,
+                            "time": f"{current_time//60:02d}:{current_time%60:02d}",
+                            "overnight": transfer.overnight,
+                            "description": f"Viaje de {transfer.from_place} a {transfer.to_place}"
+                        })
+                        
                         intercity_transfers_count += 1
                         intercity_total_minutes += transfer.duration_minutes
                         transport_time += transfer.duration_minutes
-                    elif transfer.recommended_mode == 'walk':
-                        walking_time += transfer.duration_minutes
-                    else:
-                        transport_time += transfer.duration_minutes
+                        total_distance += transfer.distance_km
+                        current_time += transfer.duration_minutes
+                        
+                        self.logger.info(f"🚗 Transfer intercity: {transfer.from_place} → {transfer.to_place} ({transfer.distance_km:.1f}km, {transfer.duration_minutes:.0f}min)")
+                
+                # Actualizar ubicación actual al hotel base del cluster
+                current_location = hotel_location
             
             # Routear actividades del cluster con time windows
             cluster_activities, cluster_timeline = await self._route_cluster_with_time_windows(
@@ -746,8 +1092,9 @@ class HybridOptimizerV31:
         
         return {
             "date": date,
-            "activities": activities_scheduled,
+            "activities": timeline,  # Usar timeline completo (actividades + transfers) en lugar de solo activities_scheduled
             "timeline": timeline,
+            "pure_activities": activities_scheduled,  # Mantener actividades puras por compatibilidad
             "transfers": transfers,
             "free_blocks": free_blocks,
             "actionable_recommendations": actionable_recommendations,
@@ -800,9 +1147,25 @@ class HybridOptimizerV31:
                 'google_enhanced': False
             }
         
-        # Determinar nombres reales (sin fallar)
+        # Determinar nombres reales (sin fallar) - MEJORADO
         try:
+            # Si tenemos información del home_base del lugar de origen, usarla
             from_place = await self._get_nearest_named_place(origin)
+            
+            # MEJORA: Si no encontramos un nombre específico, intentar encontrar el hotel base más cercano
+            if from_place.startswith("Lat ") or "Lugar de interés" in from_place or not from_place:
+                # Buscar hoteles cercanos como fallback
+                nearby_hotels = await self.places_service.search_nearby(
+                    lat=origin[0], 
+                    lon=origin[1],
+                    types=['lodging', 'accommodation'],
+                    radius_m=500,  # Radio más pequeño para hoteles
+                    limit=1
+                )
+                if nearby_hotels:
+                    from_place = nearby_hotels[0].get('name', from_place)
+                else:
+                    from_place = f"Ubicación ({origin[0]:.3f}, {origin[1]:.3f})"
         except:
             from_place = f"Ubicación ({origin[0]:.3f}, {origin[1]:.3f})"
             
@@ -969,7 +1332,9 @@ class HybridOptimizerV31:
         daily_window: TimeWindow,
         transport_mode: str
     ) -> Tuple[List[ActivityItem], List]:
-        """Routear cluster respetando time windows preferidas"""
+        """
+        🏨 Routear cluster con hotel como base: SALIR del hotel → actividades → REGRESAR al hotel
+        """
         if not cluster.places:
             return [], []
         
@@ -979,9 +1344,21 @@ class HybridOptimizerV31:
         activities = []
         timeline = []
         current_time = start_time
-        current_location = (cluster.home_base['lat'], cluster.home_base['lon']) if cluster.home_base else (cluster.places[0]['lat'], cluster.places[0]['lon'])
         
-        for place in sorted_places:
+        # 🏨 PUNTO DE PARTIDA: Siempre iniciar desde el hotel/accommodation
+        hotel_location = None
+        if cluster.home_base:
+            hotel_location = (cluster.home_base['lat'], cluster.home_base['lon'])
+            current_location = hotel_location
+            self.logger.debug(f"🏨 Iniciando día desde hotel: {cluster.home_base['name']}")
+        else:
+            current_location = (cluster.places[0]['lat'], cluster.places[0]['lon'])
+            self.logger.warning(f"⚠️ Cluster sin hotel - iniciando desde primer lugar")
+        
+        # Filtrar lugares que NO son accommodation (ya que el hotel es la base, no una actividad)
+        activity_places = [p for p in sorted_places if p.get('place_type') != 'accommodation' and p.get('type') != 'accommodation']
+        
+        for place in activity_places:
             place_location = (place['lat'], place['lon'])
             
             # Transfer si es necesario
@@ -1001,7 +1378,9 @@ class HybridOptimizerV31:
                     is_intercity=False
                 )
                 
-                timeline.append(transfer)
+                # Convertir TransferItem a dict normalizado
+                transfer_dict = self._transfer_item_to_dict(transfer)
+                timeline.append(transfer_dict)
                 current_time += transfer.duration_minutes
             
             # Buscar time window óptima
@@ -1043,6 +1422,38 @@ class HybridOptimizerV31:
             timeline.append(activity)
             current_time = activity.end_time
             current_location = place_location
+        
+        # 🏨 REGRESO AL HOTEL: Agregar transfer final al hotel si terminamos en otro lugar
+        if hotel_location and current_location != hotel_location and activities:
+            self.logger.info(f"🔄 Agregando regreso al hotel desde última actividad")
+            self.logger.debug(f"Hotel: {hotel_location}, Ubicación actual: {current_location}")
+            
+            try:
+                eta_info = await self.routing_service.eta_between(
+                    current_location, hotel_location, transport_mode
+                )
+                
+                final_mode = self._decide_mode_by_distance_km(eta_info['distance_km'], transport_mode)
+                return_transfer = TransferItem(
+                    type="transfer",
+                    from_place="última actividad",
+                    to_place=cluster.home_base['name'],
+                    distance_km=eta_info['distance_km'],
+                    duration_minutes=int(eta_info['duration_minutes']),
+                    recommended_mode=final_mode,
+                    is_intercity=False,
+                    is_return_to_hotel=True  # Marcar como regreso al hotel
+                )
+                
+                # Convertir TransferItem a dict normalizado
+                return_transfer_dict = self._transfer_item_to_dict(return_transfer)
+                timeline.append(return_transfer_dict)
+                self.logger.info(f"✅ Regreso al hotel agregado: {eta_info['distance_km']:.1f}km, {eta_info['duration_minutes']:.0f}min")
+                
+            except Exception as e:
+                self.logger.warning(f"⚠️ Error calculando regreso al hotel: {e}")
+        else:
+            self.logger.debug(f"🔍 No se agrega regreso al hotel. Hotel: {hotel_location}, Actual: {current_location}, Actividades: {len(activities)}")
         
         return activities, timeline
     
@@ -1617,7 +2028,7 @@ async def optimize_itinerary_hybrid_v31(
         }
     
     # 2. Enhanced home base assignment
-    clusters = await optimizer.assign_home_base_to_clusters(clusters, accommodations)
+    clusters = await optimizer.assign_home_base_to_clusters(clusters, accommodations, places)
     
     # 3. Allocate clusters to days
     day_assignments = optimizer.allocate_clusters_to_days(clusters, start_date, end_date)
@@ -1630,9 +2041,19 @@ async def optimize_itinerary_hybrid_v31(
     previous_end_location = None
     last_active_base = None
     
-    # Crear lista ordenada de fechas para tener índice de día
+    # Para el primer día, identificar el hotel base como punto de partida
+    first_day_hotel = None
     sorted_dates = sorted(day_assignments.keys())
     
+    # Buscar el primer día con actividades para obtener su hotel base
+    for date_str in sorted_dates:
+        if day_assignments[date_str]:  # Día con actividades
+            first_cluster = day_assignments[date_str][0]
+            if hasattr(first_cluster, 'home_base') and first_cluster.home_base:
+                first_day_hotel = (first_cluster.home_base['lat'], first_cluster.home_base['lon'])
+                break
+    
+    # Crear lista ordenada de fechas para tener índice de día
     for day_index, date_str in enumerate(sorted_dates):
         day_number = day_index + 1  # Día 1, 2, 3, etc.
         assigned_clusters = day_assignments[date_str]
@@ -1679,8 +2100,13 @@ async def optimize_itinerary_hybrid_v31(
             })
             continue
         
+        # Para el primer día activo, usar el hotel base como punto de partida
+        start_location = previous_end_location
+        if previous_end_location is None and first_day_hotel is not None:
+            start_location = first_day_hotel
+            
         day_result = await optimizer.route_day_enhanced(
-            date_str, assigned_clusters, time_window, transport_mode, previous_end_location, day_number
+            date_str, assigned_clusters, time_window, transport_mode, start_location, day_number
         )
         days.append(day_result)
         previous_end_location = day_result.get('end_location')
@@ -1708,6 +2134,17 @@ async def optimize_itinerary_hybrid_v31(
             "hotels_assigned": sum(1 for c in clusters if c.home_base_source != "none"),
             "recommended_hotels": sum(1 for c in clusters if c.home_base_source == "recommended"),
             "packing_strategy_used": packing_strategy
+        },
+        "additional_recommendations": {
+            "intercity_suggestions": [
+                {
+                    "cluster_id": c.label,
+                    "hotel_name": c.home_base.get('name', 'N/A') if c.home_base else 'N/A',
+                    "local_attractions": c.additional_suggestions,
+                    "message": f"Ya que visitarás {c.home_base.get('name', 'esta área')}, te sugerimos estas actividades adicionales en la zona:"
+                }
+                for c in clusters if hasattr(c, 'additional_suggestions') and c.additional_suggestions
+            ]
         }
     }
 

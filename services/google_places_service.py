@@ -58,6 +58,8 @@ class GooglePlacesService:
             'park': ['Parque urbano', 'Plaza verde', 'Área recreativa'],
             'shopping_mall': ['Centro comercial', 'Mercado local', 'Tiendas'],
             'cafe': ['Café local', 'Lugar de café', 'Cafetería'],
+            'lodging': ['Hotel Plaza', 'Hotel Centro', 'Hostal Local'],
+            'accommodation': ['Hotel Ejecutivo', 'Hotel Boutique', 'Hotel Business'],
             'point_of_interest': ['Lugar de interés', 'Punto destacado', 'Sitio relevante']
         }
         
@@ -67,7 +69,18 @@ class GooglePlacesService:
         for i in range(max_suggestions):
             place_type = types[i % len(types)]
             suggestions = type_suggestions.get(place_type, ['Lugar de interés'])
-            name = suggestions[i % len(suggestions)]
+            base_name = suggestions[i % len(suggestions)]
+            
+            # Mejora especial para hoteles: agregar contexto geográfico
+            if place_type in ['lodging', 'accommodation']:
+                # Inferir ciudad aproximada basándose en coordenadas conocidas de Chile
+                city_name = self._infer_city_name(lat, lon)
+                if city_name and city_name not in base_name:
+                    name = f"{base_name} {city_name}"
+                else:
+                    name = base_name
+            else:
+                name = base_name
             
             # Coordenadas con offset pequeño para evitar solapamiento
             offset_lat = lat + (i * 0.001)  # ~110 metros entre cada sugerencia
@@ -92,6 +105,37 @@ class GooglePlacesService:
             })
         
         return synthetic_places
+    
+    def _infer_city_name(self, lat: float, lon: float) -> str:
+        """Inferir nombre de ciudad basándose en coordenadas aproximadas de Chile"""
+        # Ciudades principales de Chile con sus coordenadas aproximadas
+        cities = [
+            (-33.4489, -70.6693, "Santiago"),
+            (-23.6509, -70.3975, "Antofagasta"), 
+            (-29.9027, -71.2519, "La Serena"),
+            (-36.8201, -73.0444, "Concepción"),
+            (-39.8142, -73.2459, "Valdivia"),
+            (-20.2141, -70.1522, "Iquique"),
+            (-27.3668, -70.4037, "Copiapó"),
+            (-22.4908, -68.9016, "Calama"),
+            (-18.4783, -70.3146, "Arica"),
+            (-41.4693, -72.9424, "Puerto Montt"),
+            (-53.1638, -70.9171, "Punta Arenas")
+        ]
+        
+        min_distance = float('inf')
+        closest_city = ""
+        
+        for city_lat, city_lon, city_name in cities:
+            distance = ((lat - city_lat) ** 2 + (lon - city_lon) ** 2) ** 0.5
+            if distance < min_distance:
+                min_distance = distance
+                closest_city = city_name
+        
+        # Solo devolver ciudad si está relativamente cerca (< 1 grado ~ 100km)
+        if min_distance < 1.0:
+            return closest_city
+        return ""
     
     async def search_nearby_real(
         self,
