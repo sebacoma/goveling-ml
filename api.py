@@ -211,6 +211,13 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 category_value = safe_enum_value(place_dict.get('category') or place_dict.get('type'), 'general')
                 type_value = safe_enum_value(place_dict.get('type') or place_dict.get('category'), 'point_of_interest')
                 
+                # Determinar quality flag si rating < 4.5
+                rating_value = max(0.0, min(5.0, safe_float(place_dict.get('rating'))))
+                quality_flag = None
+                if rating_value > 0 and rating_value < 4.5:
+                    quality_flag = "user_provided_below_threshold"
+                    logger.info(f"⚠️ Lugar con rating bajo: {place_dict.get('name', 'lugar')} ({rating_value}⭐) - marcado como user_provided")
+                
                 normalized_place = {
                     'place_id': place_dict.get('place_id') or place_dict.get('id') or f"place_{i}",
                     'name': safe_str(place_dict.get('name'), f"Lugar {i+1}"),
@@ -218,7 +225,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     'lon': safe_float(place_dict.get('lon')),
                     'category': category_value,
                     'type': type_value,
-                    'rating': max(0.0, min(5.0, safe_float(place_dict.get('rating')))),
+                    'rating': rating_value,
                     'price_level': max(0, min(4, safe_int(place_dict.get('price_level')))),
                     'address': safe_str(place_dict.get('address')),
                     'description': safe_str(place_dict.get('description'), f"Visita a {place_dict.get('name', 'lugar')}"),
@@ -226,7 +233,8 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     'opening_hours': place_dict.get('opening_hours') or {},
                     'website': safe_str(place_dict.get('website')),
                     'phone': safe_str(place_dict.get('phone')),
-                    'priority': max(1, min(10, safe_int(place_dict.get('priority'), 5)))
+                    'priority': max(1, min(10, safe_int(place_dict.get('priority'), 5))),
+                    'quality_flag': quality_flag  # Agregar quality flag
                 }
                 
                 logger.info(f"✅ Lugar normalizado: {normalized_place['name']} ({normalized_place['lat']}, {normalized_place['lon']})")
@@ -414,14 +422,45 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         optimization_metrics = optimization_result.get('optimization_metrics', {})
         clusters_info = optimization_result.get('clusters_info', {})  # ← LÍNEA AÑADIDA
         
+        # 🔧 CORREGIR ALIASES EN INTERCITY TRANSFERS TEMPRANO (antes de recommendations)
+        if 'intercity_transfers' in optimization_metrics and days_data:
+            # Construir bases referenciales desde days_data
+            temp_bases = []
+            for day in days_data:
+                base = day.get('base', {})
+                if base:
+                    temp_bases.append(base)
+            
+            # Corregir aliases en optimization_metrics
+            corrected_transfers = []
+            for transfer in optimization_metrics['intercity_transfers']:
+                corrected_transfer = transfer.copy()
+                
+                from_lat = transfer.get('from_lat', 0)
+                from_lon = transfer.get('from_lon', 0)
+                to_lat = transfer.get('to_lat', 0)
+                to_lon = transfer.get('to_lon', 0)
+                
+                for base in temp_bases:
+                    base_lat = base.get('lat', 0)
+                    base_lon = base.get('lon', 0)
+                    
+                    # Corregir FROM
+                    if (abs(base_lat - from_lat) < 0.01 and abs(base_lon - from_lon) < 0.01):
+                        corrected_transfer['from'] = base.get('name', transfer.get('from', ''))
+                    
+                    # Corregir TO
+                    if (abs(base_lat - to_lat) < 0.01 and abs(base_lon - to_lon) < 0.01):
+                        corrected_transfer['to'] = base.get('name', transfer.get('to', ''))
+                
+                corrected_transfers.append(corrected_transfer)
+            
+            optimization_metrics['intercity_transfers'] = corrected_transfers
+        
         # Contar actividades totales
         total_activities = sum(len(day.get("activities", [])) for day in days_data)
         
-        # Calcular tiempo total de viaje
-        total_travel_minutes = sum([
-            day.get("travel_summary", {}).get("total_travel_time_s", 0) / 60
-            for day in days_data
-        ])
+
         
         # Determinar el modo de optimización usado
         optimization_mode = "hotel_centroid" if hotels_provided else "geographic_clustering"
@@ -446,7 +485,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             f"Método híbrido V3.1: DBSCAN + Time Windows + ETAs reales",
             f"{total_activities} actividades distribuidas en {len(days_data)} días",
             f"Score de eficiencia: {optimization_result.get('optimization_metrics', {}).get('efficiency_score', 0.9):.1%}",
-            f"Tiempo total de viaje: {int(total_travel_minutes)} minutos",
+            # f"Tiempo total de viaje: {int(total_travel_minutes)} minutos", # Calculado después
             f"Estrategia de empaquetado: {clusters_info.get('packing_strategy_used', 'balanced')}"
         ])
         
@@ -521,7 +560,241 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             else:
                 return getattr(activity, key, default)
         
-        def format_activity_for_frontend(activity, order):
+        def calculate_dynamic_duration(activity):
+            """Calcular duración dinámica basada en tipo de actividad y distancia"""
+            # Si ya tiene duration_minutes, usarlo
+            if get_value(activity, 'duration_minutes', 0) > 0:
+                return get_value(activity, 'duration_minutes', 0)
+            
+            # Para transfers, verificar si ya tiene tiempo calculado en el nombre
+            activity_name = str(get_value(activity, 'name', ''))
+            activity_name_lower = activity_name.lower()
+            is_transfer = (get_value(activity, 'category', '') == 'transfer' or 
+                          get_value(activity, 'type', '') == 'transfer' or
+                          'traslado' in activity_name_lower or 'transfer' in activity_name_lower)
+            
+            if is_transfer:
+                # Primero verificar si el nombre ya incluye duración calculada
+                import re
+                # Buscar patrones como "(68min)" o "(3h)" o "(2.5h)" 
+                minutes_match = re.search(r'\((\d+)min\)', activity_name)
+                hours_match = re.search(r'\((\d+(?:\.\d+)?)h\)', activity_name)
+                
+                if minutes_match:
+                    calculated_minutes = int(minutes_match.group(1))
+                    logger.info(f"✅ Usando duración del optimizador (min): '{activity_name}' = {calculated_minutes}min")
+                    return calculated_minutes
+                elif hours_match:
+                    calculated_hours = float(hours_match.group(1))
+                    calculated_minutes = int(calculated_hours * 60)
+                    logger.info(f"✅ Usando duración del optimizador (h): '{activity_name}' = {calculated_hours}h → {calculated_minutes}min")
+                    return calculated_minutes
+                distance_km = get_value(activity, 'distance_km', 0)
+                transport_mode = get_value(activity, 'transport_mode', request.transport_mode if hasattr(request, 'transport_mode') else 'walk')
+                # Si no hay distance_km, intentar calcular con coordenadas
+                if distance_km <= 0:
+                    origin_lat = get_value(activity, 'origin_lat')
+                    origin_lon = get_value(activity, 'origin_lon')
+                    dest_lat = get_value(activity, 'lat')
+                    dest_lon = get_value(activity, 'lon')
+                    
+                    if all([origin_lat, origin_lon, dest_lat, dest_lon]):
+                        from utils.geo_utils import haversine_km  
+                        distance_km = haversine_km(origin_lat, origin_lon, dest_lat, dest_lon)
+                        logger.debug(f"🔧 Calculando distancia para transfer '{activity_name}': {distance_km:.2f}km")
+                
+                if distance_km > 0:
+                    # Velocidades realistas por modo
+                    speeds = {
+                        'walk': 4.5,      # 4.5 km/h caminando
+                        'walking': 4.5,
+                        'drive': 45.0,    # 45 km/h en ciudad/carretera
+                        'car': 45.0,
+                        'transit': 30.0,  # 30 km/h transporte público
+                        'bicycle': 15.0   # 15 km/h bicicleta
+                    }
+                    
+                    speed_kmh = speeds.get(transport_mode, 4.5)
+                    duration_minutes = (distance_km / speed_kmh) * 60
+                    
+                    # Buffer adicional para transfers largos
+                    if distance_km > 30:  # Intercity
+                        duration_minutes *= 1.2  # 20% buffer
+                    else:  # Urbano
+                        duration_minutes *= 1.1  # 10% buffer
+                    
+                    calculated_time = max(5, int(duration_minutes))
+                    logger.info(f"✅ Transfer dinámico: '{activity_name}' = {distance_km:.2f}km → {calculated_time}min ({transport_mode})")
+                    return calculated_time
+                else:
+                    # Fallback para transfers sin coordenadas: tiempo estimado por modo
+                    fallback_times = {
+                        'walk': 20,    # 20 min caminando urbano
+                        'walking': 20,
+                        'drive': 15,   # 15 min conduciendo urbano  
+                        'car': 15,
+                        'transit': 25, # 25 min transporte público
+                        'bicycle': 12  # 12 min bicicleta
+                    }
+                    fallback_time = fallback_times.get(transport_mode, 20)
+                    logger.warning(f"⚠️ Transfer sin coordenadas '{activity_name}' - usando fallback: {fallback_time}min")
+                    return fallback_time
+            
+            # Valores por defecto según tipo de actividad
+            activity_defaults = {
+                'hotel': 30,           # Check-in/check-out
+                'restaurant': 90,      # Comida
+                'museum': 120,         # Visita museo
+                'tourist_attraction': 90,  # Atracción turística
+                'park': 60,           # Parque
+                'cafe': 45,           # Café
+                'shopping_mall': 120, # Compras
+            }
+            
+            category = get_value(activity, 'category', get_value(activity, 'type', 'point_of_interest'))
+            return activity_defaults.get(category, 60)  # 1 hora por defecto
+
+        def format_time_window(activity, all_activities=None, activity_index=None):
+            """Formatear ventana de tiempo para actividades, especialmente transfers"""
+            start_time = get_value(activity, 'start_time', 0)
+            end_time = get_value(activity, 'end_time', 0)
+            
+            # Para transfers, calcular tiempo basado en actividad anterior si no tiene tiempos válidos
+            is_transfer = (get_value(activity, 'category', '') == 'transfer' or 
+                          get_value(activity, 'type', '') == 'transfer' or
+                          'traslado' in str(get_value(activity, 'name', '')).lower() or
+                          'viaje' in str(get_value(activity, 'name', '')).lower() or
+                          'regreso' in str(get_value(activity, 'name', '')).lower())
+            
+            if is_transfer and (start_time == 0 or start_time == end_time) and all_activities and activity_index is not None:
+                # Usar tiempo de la actividad anterior + su duración como inicio del transfer
+                if activity_index > 0:
+                    prev_activity = all_activities[activity_index - 1]
+                    prev_end_time = get_value(prev_activity, 'end_time', 0)
+                    transfer_duration = calculate_dynamic_duration_with_context(activity, all_activities, activity_index)
+                    
+                    if prev_end_time > 0:
+                        start_time = prev_end_time
+                        end_time = start_time + transfer_duration
+            
+            # Si aún no hay tiempos válidos, omitir best_time
+            if start_time == 0 and end_time == 0:
+                return None
+            
+            # Validar que los tiempos estén en rango válido (0-1440 minutos = 24h)
+            if start_time < 0 or start_time >= 1440 or end_time < 0 or end_time >= 1440:
+                return None
+            
+            return f"{start_time//60:02d}:{start_time%60:02d}-{end_time//60:02d}:{end_time%60:02d}"
+
+        def calculate_dynamic_duration_with_context(activity, all_activities, activity_index):
+            """Calcular duración dinámica con acceso a actividades adyacentes para inferir coordenadas"""
+            # Si ya tiene duration_minutes, usarlo
+            if get_value(activity, 'duration_minutes', 0) > 0:
+                return get_value(activity, 'duration_minutes', 0)
+            
+            # Para transfers, verificar si ya tiene tiempo calculado en el nombre
+            activity_name = str(get_value(activity, 'name', ''))
+            activity_name_lower = activity_name.lower()
+            is_transfer = (get_value(activity, 'category', '') == 'transfer' or 
+                          get_value(activity, 'type', '') == 'transfer' or
+                          'traslado' in activity_name_lower or 'transfer' in activity_name_lower or
+                          'viaje' in activity_name_lower or 'regreso' in activity_name_lower)
+            
+            if is_transfer:
+                # Primero verificar si el nombre ya incluye duración calculada
+                import re
+                minutes_match = re.search(r'\((\d+)min\)', activity_name)
+                hours_match = re.search(r'\((\d+(?:\.\d+)?)h\)', activity_name)
+                
+                if minutes_match:
+                    calculated_minutes = int(minutes_match.group(1))
+                    logger.info(f"✅ Usando duración del optimizador (min): '{activity_name}' = {calculated_minutes}min")
+                    return calculated_minutes
+                elif hours_match:
+                    calculated_hours = float(hours_match.group(1))
+                    calculated_minutes = int(calculated_hours * 60)
+                    logger.info(f"✅ Usando duración del optimizador (h): '{activity_name}' = {calculated_hours}h → {calculated_minutes}min")
+                    return calculated_minutes
+                
+                # Si no hay tiempo en el nombre, intentar inferir coordenadas de actividades adyacentes
+                origin_coords = None
+                dest_coords = None
+                
+                # Actividad anterior (origen del transfer)
+                if activity_index > 0:
+                    prev_activity = all_activities[activity_index - 1]
+                    prev_lat = get_value(prev_activity, 'lat', 0.0)
+                    prev_lon = get_value(prev_activity, 'lon', 0.0)
+                    if prev_lat != 0.0 and prev_lon != 0.0:
+                        origin_coords = (prev_lat, prev_lon)
+                
+                # Actividad siguiente (destino del transfer)
+                if activity_index < len(all_activities) - 1:
+                    next_activity = all_activities[activity_index + 1]
+                    next_lat = get_value(next_activity, 'lat', 0.0)
+                    next_lon = get_value(next_activity, 'lon', 0.0)
+                    if next_lat != 0.0 and next_lon != 0.0:
+                        dest_coords = (next_lat, next_lon)
+                
+                # Calcular distancia si tenemos ambas coordenadas
+                if origin_coords and dest_coords:
+                    from utils.geo_utils import haversine_km
+                    distance_km = haversine_km(origin_coords[0], origin_coords[1], dest_coords[0], dest_coords[1])
+                    
+                    # Velocidades realistas por modo de transporte
+                    transport_mode = get_value(activity, 'transport_mode', request.transport_mode if hasattr(request, 'transport_mode') else 'drive')
+                    speeds = {
+                        'walk': 4.5,      # 4.5 km/h caminando
+                        'walking': 4.5,
+                        'drive': 45.0,    # 45 km/h en ciudad/carretera
+                        'car': 45.0,
+                        'transit': 30.0,  # 30 km/h transporte público
+                        'bicycle': 15.0   # 15 km/h bicicleta
+                    }
+                    
+                    speed_kmh = speeds.get(transport_mode, 45.0)
+                    duration_minutes = (distance_km / speed_kmh) * 60
+                    
+                    # Buffer adicional para transfers largos
+                    if distance_km > 30:  # Intercity
+                        duration_minutes *= 1.2  # 20% buffer
+                    else:  # Urbano
+                        duration_minutes *= 1.1  # 10% buffer
+                    
+                    calculated_time = max(5, int(duration_minutes))
+                    logger.info(f"✅ Transfer dinámico calculado: '{activity_name}' = {distance_km:.2f}km → {calculated_time}min ({transport_mode})")
+                    return calculated_time
+                else:
+                    # Fallback para transfers sin coordenadas
+                    transport_mode = get_value(activity, 'transport_mode', request.transport_mode if hasattr(request, 'transport_mode') else 'drive')
+                    fallback_times = {
+                        'walk': 20,    # 20 min caminando urbano
+                        'walking': 20,
+                        'drive': 15,   # 15 min conduciendo urbano  
+                        'car': 15,
+                        'transit': 25, # 25 min transporte público
+                        'bicycle': 12  # 12 min bicicleta
+                    }
+                    fallback_time = fallback_times.get(transport_mode, 15)
+                    logger.warning(f"⚠️ Transfer sin coordenadas válidas '{activity_name}' - usando fallback: {fallback_time}min")
+                    return fallback_time
+            
+            # Valores por defecto según tipo de actividad (no transfers)
+            activity_defaults = {
+                'hotel': 30,           # Check-in/check-out
+                'restaurant': 90,      # Comida
+                'museum': 120,         # Visita museo
+                'tourist_attraction': 90,  # Atracción turística
+                'park': 60,           # Parque
+                'cafe': 45,           # Café
+                'shopping_mall': 120, # Compras
+            }
+            
+            category = get_value(activity, 'category', get_value(activity, 'type', 'point_of_interest'))
+            return activity_defaults.get(category, 60)  # 1 hora por defecto
+
+        def format_activity_for_frontend(activity, order, all_activities=None, activity_index=None):
             """Convertir ActivityItem o IntercityActivity a formato esperado por frontend"""
             import uuid
             
@@ -529,65 +802,162 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             is_intercity = get_value(activity, 'is_intercity_activity', False) or get_value(activity, 'type', '') == 'intercity_activity'
             
             if is_intercity:
-                # Formateo especial para actividades intercity
-                return {
-                    "id": str(uuid.uuid4()),
-                    "name": get_value(activity, 'name', 'Viaje intercity'),
-                    "category": "intercity_transfer",
-                    "rating": 0.0,
-                    "image": "",
-                    "description": get_value(activity, 'description', 'Viaje entre ciudades'),
-                    "estimated_time": f"{get_value(activity, 'duration_minutes', 0)/60:.1f}h",
-                    "priority": 0,
-                    "lat": get_value(activity, 'lat', 0.0),
-                    "lng": get_value(activity, 'lon', 0.0),
-                    "recommended_duration": f"{get_value(activity, 'duration_minutes', 0)/60:.1f}h",
-                    "best_time": f"{get_value(activity, 'start_time', 0)//60:02d}:{get_value(activity, 'start_time', 0)%60:02d}-{get_value(activity, 'end_time', 0)//60:02d}:{get_value(activity, 'end_time', 0)%60:02d}",
-                    "order": order,
-                    "transport_mode": get_value(activity, 'transport_mode', 'drive'),
-                    "is_intercity": True
-                }
+                # Las actividades intercity NO deben aparecer como places individuales
+                # Solo aparecen en optimization_metrics.intercity_transfers
+                return None
             else:
-                # Formateo normal para POIs - ahora compatible con dicts y objetos
-                return {
+                # Detectar si es un transfer para agregar coordenadas de origen y destino
+                is_transfer = (get_value(activity, 'category', '') == 'transfer' or 
+                              get_value(activity, 'type', '') == 'transfer')
+                
+                base_data = {
                     "id": str(uuid.uuid4()),
                     "name": get_value(activity, 'name', 'Lugar sin nombre'),
                     "category": get_value(activity, 'place_type', get_value(activity, 'type', 'point_of_interest')),
                     "rating": get_value(activity, 'rating', 4.5) or 4.5,
                     "image": get_value(activity, 'image', ''),
                     "description": get_value(activity, 'description', f"Actividad en {get_value(activity, 'name', 'lugar')}"),
-                    "estimated_time": f"{get_value(activity, 'duration_minutes', 60)/60:.1f}h",
+                    "estimated_time": f"{(calculate_dynamic_duration_with_context(activity, all_activities or [], activity_index or 0) if all_activities and activity_index is not None else calculate_dynamic_duration(activity))/60:.1f}h",
                     "priority": get_value(activity, 'priority', 5),
                     "lat": get_value(activity, 'lat', 0.0),
                     "lng": get_value(activity, 'lon', 0.0),  # Frontend espera 'lng'
                     "recommended_duration": f"{get_value(activity, 'duration_minutes', 60)/60:.1f}h",
-                    "best_time": f"{get_value(activity, 'start_time', 0)//60:02d}:{get_value(activity, 'start_time', 0)%60:02d}-{get_value(activity, 'end_time', 0)//60:02d}:{get_value(activity, 'end_time', 0)%60:02d}",
+                    "best_time": format_time_window(activity, all_activities, activity_index),
                     "order": order,
-                    "is_intercity": False
+                    "is_intercity": False,
+                    "quality_flag": get_value(activity, 'quality_flag', None)  # Agregar quality flag al frontend
                 }
+                
+                # Para transfers, agregar coordenadas de origen y destino
+                if is_transfer:
+                    # Obtener coordenadas FROM del optimizer (si están disponibles)
+                    from_lat = get_value(activity, 'from_lat', 0.0)
+                    from_lng = get_value(activity, 'from_lon', 0.0)  # Intenta 'from_lon' primero
+                    if from_lng == 0.0:  # Si no encuentra, intenta 'from_lng'
+                        from_lng = get_value(activity, 'from_lng', 0.0)
+                    
+                    # Si no hay coordenadas FROM del optimizer, calcular desde el place anterior
+                    if (from_lat == 0.0 and from_lng == 0.0 and all_activities and activity_index is not None):
+                        if activity_index > 0:
+                            # Caso normal: tomar del place anterior en el mismo día
+                            prev_activity = all_activities[activity_index - 1]
+                            prev_lat = get_value(prev_activity, 'lat', 0.0)
+                            # Intentar ambos formatos para longitude
+                            prev_lng = get_value(prev_activity, 'lng', 0.0)
+                            if prev_lng == 0.0:
+                                prev_lng = get_value(prev_activity, 'lon', 0.0)
+                            
+                            # Debug: verificar si el lugar anterior tiene coordenadas válidas
+                            if prev_lat == 0.0 and prev_lng == 0.0:
+                                # Si el anterior tampoco tiene coordenadas, buscar más atrás
+                                for j in range(activity_index - 2, -1, -1):
+                                    candidate = all_activities[j]
+                                    cand_lat = get_value(candidate, 'lat', 0.0)
+                                    # Intentar ambos formatos para longitude
+                                    cand_lng = get_value(candidate, 'lng', 0.0)
+                                    if cand_lng == 0.0:
+                                        cand_lng = get_value(candidate, 'lon', 0.0)
+                                    if cand_lat != 0.0 or cand_lng != 0.0:
+                                        prev_lat = cand_lat
+                                        prev_lng = cand_lng
+                                        break
+                            
+                            from_lat = prev_lat
+                            from_lng = prev_lng
+                        elif activity_index == 0 and hasattr(format_activity_for_frontend, '_day_data'):
+                            # Caso especial: primer transfer del día, buscar en día anterior
+                            day_data = format_activity_for_frontend._day_data
+                            current_day = day_data.get('current_day', 1)
+                            
+                            if current_day > 1:
+                                # Buscar el último place del día anterior
+                                prev_day_activities = day_data.get('prev_day_activities', [])
+                                if prev_day_activities:
+                                    last_prev_activity = prev_day_activities[-1]
+                                    # Si el último era un transfer, usar su destino (to_lat/to_lng)
+                                    if get_value(last_prev_activity, 'category') == 'transfer':
+                                        from_lat = get_value(last_prev_activity, 'lat', 0.0)  # Destino del transfer anterior
+                                        from_lng = get_value(last_prev_activity, 'lng', 0.0)
+                                        if from_lng == 0.0:
+                                            from_lng = get_value(last_prev_activity, 'lon', 0.0)
+                                    else:
+                                        from_lat = get_value(last_prev_activity, 'lat', 0.0)
+                                        from_lng = get_value(last_prev_activity, 'lng', 0.0)
+                                        if from_lng == 0.0:
+                                            from_lng = get_value(last_prev_activity, 'lon', 0.0)
+                    
+                    base_data.update({
+                        "from_lat": from_lat,
+                        "from_lng": from_lng,
+                        "to_lat": get_value(activity, 'lat', 0.0),  # Destino
+                        "to_lng": get_value(activity, 'lon', 0.0),   # Destino (frontend espera 'lng')
+                        "from_place": get_value(activity, 'from_place', ''),
+                        "to_place": get_value(activity, 'to_place', ''),
+                        "distance_km": get_value(activity, 'distance_km', 0.0),
+                        "transport_mode": get_value(activity, 'recommended_mode', 'walk')
+                    })
+                
+                return base_data
         
         # Convertir días a formato frontend
         itinerary_days = []
         day_counter = 1
+        prev_day_activities = []
         
         for day in days_data:
+            # Configurar información de contexto para transfers intercity
+            format_activity_for_frontend._day_data = {
+                'current_day': day_counter,
+                'prev_day_activities': prev_day_activities
+            }
+            
             # Convertir actividades del nuevo formato
             frontend_places = []
-            for idx, activity in enumerate(day.get("activities", []), 1):
-                frontend_place = format_activity_for_frontend(activity, idx)
-                frontend_places.append(frontend_place)
+            activities = day.get("activities", [])
+            for idx, activity in enumerate(activities, 1):
+                frontend_place = format_activity_for_frontend(activity, idx, activities, idx-1)
+                if frontend_place is not None:  # Filtrar intercity activities que retornan None
+                    frontend_places.append(frontend_place)
             
-            # Calcular tiempos del día correctamente separados
-            total_activity_time = sum([getattr(act, 'duration_minutes', 0) for act in day.get("activities", [])])
-            travel_summary = day.get("travel_summary", {})
-            walking_time_min = travel_summary.get("walking_time_minutes", 0)
-            transport_time_min = travel_summary.get("transport_time_minutes", 0)
+            # Guardar actividades de este día para el siguiente
+            prev_day_activities = frontend_places.copy()
             
-            walking_time = f"{int(walking_time_min)}min" if walking_time_min < 60 else f"{walking_time_min//60}h{walking_time_min%60}min"
-            transport_time = f"{int(transport_time_min)}min" if transport_time_min < 60 else f"{transport_time_min//60}h{transport_time_min%60}min"
+            # Calcular tiempos del día correctamente desde frontend_places
+            total_activity_time_min = 0
+            transport_time_min = 0
+            walking_time_min = 0
             
-            free_minutes = day.get("free_minutes", 0)
-            free_time = f"{int(free_minutes)}min" if free_minutes < 60 else f"{free_minutes//60}h{free_minutes%60}min"
+            for place in frontend_places:
+                estimated_hours = float(place.get('estimated_time', '0h').replace('h', ''))
+                estimated_minutes = estimated_hours * 60
+                
+                # Sumar al tiempo total
+                total_activity_time_min += estimated_minutes
+                
+                # Clasificar entre transporte y actividades
+                is_transfer = (place.get('category') == 'transfer' or 
+                              'traslado' in place.get('name', '').lower() or
+                              'viaje' in place.get('name', '').lower() or
+                              'regreso' in place.get('name', '').lower())
+                
+                if is_transfer:
+                    # Clasificar entre walking y transport basado en duración
+                    if estimated_minutes <= 30:  # <= 30min = walking
+                        walking_time_min += estimated_minutes
+                    else:  # > 30min = transport
+                        transport_time_min += estimated_minutes
+            
+            # Formatear tiempos
+            total_time_hours = total_activity_time_min / 60
+            walking_time = f"{int(walking_time_min)}min" if walking_time_min < 60 else f"{int(walking_time_min//60)}h{int(walking_time_min%60)}min" if walking_time_min%60 > 0 else f"{int(walking_time_min//60)}h"
+            transport_time = f"{int(transport_time_min)}min" if transport_time_min < 60 else f"{int(transport_time_min//60)}h{int(transport_time_min%60)}min" if transport_time_min%60 > 0 else f"{int(transport_time_min//60)}h"
+            
+            # Calcular tiempo libre (horas del día - tiempo total)
+            daily_start_hour = request.daily_start_hour if hasattr(request, 'daily_start_hour') else 9
+            daily_end_hour = request.daily_end_hour if hasattr(request, 'daily_end_hour') else 18
+            available_hours = daily_end_hour - daily_start_hour
+            free_hours = max(0, available_hours - total_time_hours)
+            free_time = f"{int(free_hours)}h{int((free_hours % 1) * 60)}min" if free_hours % 1 > 0 else f"{int(free_hours)}h"
             
             # Determinar si es sugerido (días libres detectados)
             is_suggested = len(day.get("activities", [])) == 0
@@ -596,7 +966,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 "day": day_counter,
                 "date": day.get("date", ""),
                 "places": frontend_places,
-                "total_time": f"{int(total_activity_time/60)}h",
+                "total_time": f"{total_time_hours:.1f}h",
                 "walking_time": walking_time,
                 "transport_time": transport_time,  # Ahora separado correctamente
                 "free_time": free_time,
@@ -615,21 +985,120 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             itinerary_days.append(day_data)
             day_counter += 1
         
+        # 📊 RECALCULAR MÉTRICAS GLOBALES SUMANDO LOS DÍAS
+        total_transport_minutes = 0
+        total_walking_minutes = 0
+        
+        # Convertir strings como "24min" o "1h30min" a minutos
+        def parse_time_string(time_str):
+            if not time_str or time_str == "0min":
+                return 0
+            minutes = 0
+            if "h" in time_str:
+                parts = time_str.split("h")
+                hours = int(parts[0]) if parts[0] else 0
+                minutes += hours * 60
+                if len(parts) > 1 and parts[1]:
+                    min_part = parts[1].replace("min", "")
+                    if min_part:
+                        minutes += int(min_part)
+            elif "min" in time_str:
+                minutes = int(time_str.replace("min", ""))
+            return minutes
+        
+        for day in itinerary_days:
+            # Extraer minutos de transport_time y walking_time
+            transport_str = day.get("transport_time", "0min")
+            walking_str = day.get("walking_time", "0min")
+            
+            total_transport_minutes += parse_time_string(transport_str)
+            total_walking_minutes += parse_time_string(walking_str)
+        
+        total_travel_minutes = total_transport_minutes + total_walking_minutes
+        
         # Estructura final para frontend
         # 📊 MÉTRICAS COMPLETAS del optimizer (incluyendo optimization_mode, fallback_active, etc.)
-        optimizer_metrics = optimization_result.get("optimization_metrics", {})
+        # NOTA: Los aliases ya fueron corregidos temprano, usar optimization_metrics directamente
+        optimizer_metrics = optimization_metrics
         
-        # 🕐 Calcular duración del procesamiento
+        # � CORREGIR ALIASES EN INTERCITY TRANSFERS - usar nombres reales de bases
+        if 'intercity_transfers' in optimizer_metrics and itinerary_days:
+            corrected_transfers = []
+            
+            for transfer in optimizer_metrics['intercity_transfers']:
+                corrected_transfer = transfer.copy()
+                
+                # Buscar la base real del día de origen usando coordenadas
+                from_lat = transfer.get('from_lat', 0)
+                from_lon = transfer.get('from_lon', 0)
+                
+                # Buscar la base real del día de destino usando coordenadas  
+                to_lat = transfer.get('to_lat', 0)
+                to_lon = transfer.get('to_lon', 0)
+                
+                # Corregir nombre FROM usando bases reales
+                for day in itinerary_days:
+                    base = day.get('base', {})
+                    if base:
+                        base_lat = base.get('lat', 0)
+                        base_lon = base.get('lon', 0)
+                        
+                        # Si las coordenadas coinciden con FROM, usar el nombre real
+                        if (abs(base_lat - from_lat) < 0.01 and 
+                            abs(base_lon - from_lon) < 0.01):
+                            corrected_transfer['from'] = base.get('name', transfer.get('from', ''))
+                        
+                        # Si las coordenadas coinciden con TO, usar el nombre real
+                        if (abs(base_lat - to_lat) < 0.01 and 
+                            abs(base_lon - to_lon) < 0.01):
+                            corrected_transfer['to'] = base.get('name', transfer.get('to', ''))
+                
+                corrected_transfers.append(corrected_transfer)
+            
+            # Reemplazar los transfers corregidos
+            optimizer_metrics['intercity_transfers'] = corrected_transfers
+        
+        #  Calcular duración del procesamiento
         duration = time_module.time() - start_time
+        
+        # 🔧 CORREGIR ALIASES EN day['transfers'] TAMBIÉN
+        for day in itinerary_days:
+            if 'transfers' in day:
+                for transfer in day['transfers']:
+                    if transfer.get('type') == 'intercity_transfer':
+                        # Obtener coordenadas del transfer
+                        from_lat = transfer.get('from_lat', 0)
+                        from_lon = transfer.get('from_lon', 0)
+                        to_lat = transfer.get('to_lat', 0) 
+                        to_lon = transfer.get('to_lon', 0)
+                        
+                        # Corregir nombres usando bases reales
+                        for check_day in itinerary_days:
+                            base = check_day.get('base', {})
+                            if base:
+                                base_lat = base.get('lat', 0)
+                                base_lon = base.get('lon', 0)
+                                
+                                # Corregir FROM
+                                if (abs(base_lat - from_lat) < 0.01 and 
+                                    abs(base_lon - from_lon) < 0.01):
+                                    transfer['from'] = base.get('name', transfer.get('from', ''))
+                                
+                                # Corregir TO
+                                if (abs(base_lat - to_lat) < 0.01 and 
+                                    abs(base_lon - to_lon) < 0.01):
+                                    transfer['to'] = base.get('name', transfer.get('to', ''))
         
         formatted_result = {
             "itinerary": itinerary_days,
             "optimization_metrics": {
                 # Métricas del optimizer (incluye optimization_mode, fallback_active, intercity_transfers, etc.)
                 **optimizer_metrics,
-                # Métricas adicionales calculadas en el API
+                # Métricas adicionales calculadas en el API (recalculadas desde días)
                 "total_distance_km": optimizer_metrics.get("total_distance_km", 0),
                 "total_travel_time_minutes": int(total_travel_minutes),
+                "transport_time_minutes": total_transport_minutes,  # Suma de transporte
+                "walking_time_minutes": total_walking_minutes,     # Suma de caminata
                 "processing_time_seconds": round(duration, 2),
                 "hotels_provided": hotels_provided,
                 "hotels_count": len(accommodations_data) if accommodations_data else 0,
@@ -641,6 +1110,22 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         # 🧠 GENERAR RECOMENDACIONES AUTOMÁTICAS PARA DÍAS LIBRES
         auto_recommendations = []
+        
+        # ⚠️ GENERAR RECOMENDACIONES PARA LUGARES CON QUALITY FLAGS
+        quality_recommendations = []
+        for day in itinerary_days:
+            for place in day.get("places", []):
+                if place.get("quality_flag") == "user_provided_below_threshold":
+                    # Lugar proporcionado por usuario con rating < 4.5
+                    place_name = place.get("name", "lugar")
+                    place_rating = place.get("rating", 0)
+                    quality_recommendations.append(
+                        f"⚠️ '{place_name}' ({place_rating}⭐) tiene rating bajo. "
+                        f"Considera alternativas cercanas con mejor valoración."
+                    )
+        
+        if quality_recommendations:
+            base_recommendations.extend(quality_recommendations)
         
         # 1. Detectar días completamente vacíos (sin actividades)
         empty_days = []

@@ -42,6 +42,7 @@ class Cluster:
     additional_suggestions: List[Dict] = field(default_factory=list)  # 🌟 Sugerencias adicionales para clusters remotos
 
 @dataclass
+@dataclass
 class TransferItem:
     type: str = "transfer"
     from_place: str = ""
@@ -52,6 +53,10 @@ class TransferItem:
     is_intercity: bool = False
     overnight: bool = False
     is_return_to_hotel: bool = False  # Nueva bandera para marcar regreso al hotel
+    from_lat: float = 0.0  # Coordenadas del origen
+    from_lon: float = 0.0
+    to_lat: float = 0.0    # Coordenadas del destino
+    to_lon: float = 0.0
 
 @dataclass
 class ActivityItem:
@@ -68,6 +73,7 @@ class ActivityItem:
     image: str = ""
     address: str = ""
     time_window_preferred: Optional[TimeWindow] = None
+    quality_flag: Optional[str] = None  # Agregar quality flag
 
 @dataclass
 class FreeBlock:
@@ -729,8 +735,10 @@ class HybridOptimizerV31:
             'is_return_to_hotel': getattr(transfer_item, 'is_return_to_hotel', False),
             'rating': 4.5,  # Rating por defecto para transfers
             'priority': 5,
-            'lat': 0.0,  # Los transfers no tienen ubicación específica
-            'lon': 0.0
+            'lat': getattr(transfer_item, 'to_lat', 0.0),  # Usar coordenadas del destino
+            'lon': getattr(transfer_item, 'to_lon', 0.0),
+            'from_lat': getattr(transfer_item, 'from_lat', 0.0),  # Coordenadas del origen
+            'from_lon': getattr(transfer_item, 'from_lon', 0.0)
         }
         
         # Aplicar normalización para generar nombre inteligente
@@ -914,6 +922,14 @@ class HybridOptimizerV31:
         current_time = daily_window.start
         current_location = previous_day_end_location
         
+        # Si no hay ubicación previa, usar la base del primer cluster
+        if current_location is None and assigned_clusters:
+            main_cluster = assigned_clusters[0]
+            if main_cluster.home_base:
+                current_location = (main_cluster.home_base['lat'], main_cluster.home_base['lon'])
+            elif main_cluster.places:
+                current_location = (main_cluster.places[0]['lat'], main_cluster.places[0]['lon'])
+        
         # NUEVO: Para el primer día, agregar transfer inicial desde el hotel
         if day_number == 1 and current_location and assigned_clusters:
             # Crear objeto de actividad de check-in similar a IntercityActivity
@@ -1004,6 +1020,10 @@ class HybridOptimizerV31:
                             "type": "intercity_transfer",
                             "from": transfer.from_place,
                             "to": transfer.to_place,
+                            "from_lat": transfer.from_lat,
+                            "from_lon": transfer.from_lon,
+                            "to_lat": transfer.to_lat,
+                            "to_lon": transfer.to_lon,
                             "distance_km": transfer.distance_km,
                             "duration_minutes": transfer.duration_minutes,
                             "mode": transfer.recommended_mode,
@@ -1149,28 +1169,44 @@ class HybridOptimizerV31:
         
         # Determinar nombres reales (sin fallar) - MEJORADO
         try:
-            # Si tenemos información del home_base del lugar de origen, usarla
-            from_place = await self._get_nearest_named_place(origin)
+            # PRIMERO: Verificar si las coordenadas corresponden a un hotel conocido en nuestro sistema
+            from_place = await self._get_known_hotel_name(origin)
             
-            # MEJORA: Si no encontramos un nombre específico, intentar encontrar el hotel base más cercano
-            if from_place.startswith("Lat ") or "Lugar de interés" in from_place or not from_place:
-                # Buscar hoteles cercanos como fallback
-                nearby_hotels = await self.places_service.search_nearby(
-                    lat=origin[0], 
-                    lon=origin[1],
-                    types=['lodging', 'accommodation'],
-                    radius_m=500,  # Radio más pequeño para hoteles
-                    limit=1
-                )
-                if nearby_hotels:
-                    from_place = nearby_hotels[0].get('name', from_place)
-                else:
-                    from_place = f"Ubicación ({origin[0]:.3f}, {origin[1]:.3f})"
+            if from_place:
+                self.logger.info(f"🏨 FROM lugar: Hotel conocido encontrado: {from_place}")
+            
+            # Si no es un hotel conocido, usar búsqueda de Google Places
+            if not from_place:
+                from_place = await self._get_nearest_named_place(origin)
+                self.logger.info(f"🌐 FROM lugar: Google Places devolvió: {from_place}")
+                
+                # MEJORA: Si no encontramos un nombre específico, intentar encontrar el hotel base más cercano
+                if from_place.startswith("Lat ") or "Lugar de interés" in from_place or not from_place:
+                    # Buscar hoteles cercanos como fallback
+                    nearby_hotels = await self.places_service.search_nearby(
+                        lat=origin[0], 
+                        lon=origin[1],
+                        types=['lodging', 'accommodation'],
+                        radius_m=500,  # Radio más pequeño para hoteles
+                        limit=1
+                    )
+                    if nearby_hotels:
+                        from_place = nearby_hotels[0].get('name', from_place)
+                    else:
+                        from_place = f"Ubicación ({origin[0]:.3f}, {origin[1]:.3f})"
         except:
             from_place = f"Ubicación ({origin[0]:.3f}, {origin[1]:.3f})"
             
         try:
-            to_place = target_cluster.home_base['name'] if target_cluster.home_base else await self._get_nearest_named_place(destination)
+            # PRIMERO: Usar home_base si está disponible (más confiable)
+            if target_cluster.home_base:
+                to_place = target_cluster.home_base['name']
+            else:
+                # SEGUNDO: Verificar si las coordenadas corresponden a un hotel conocido
+                to_place = await self._get_known_hotel_name(destination)
+                # TERCERO: Fallback a Google Places si no es un hotel conocido
+                if not to_place:
+                    to_place = await self._get_nearest_named_place(destination)
         except:
             to_place = f"Destino ({destination[0]:.3f}, {destination[1]:.3f})"
         
@@ -1193,7 +1229,11 @@ class HybridOptimizerV31:
             distance_km=eta_info['distance_km'],
             duration_minutes=int(eta_info['duration_minutes']),
             recommended_mode=final_mode,
-            is_intercity=is_intercity
+            is_intercity=is_intercity,
+            from_lat=origin[0],
+            from_lon=origin[1],
+            to_lat=destination[0],
+            to_lon=destination[1]
         )
         
         if is_intercity:
@@ -1270,6 +1310,10 @@ class HybridOptimizerV31:
                     "type": "intercity_transfer",
                     "from": curr_base['name'],
                     "to": next_base['name'],
+                    "from_lat": curr_base['lat'],
+                    "from_lon": curr_base['lon'],
+                    "to_lat": next_base['lat'],
+                    "to_lon": next_base['lon'],
                     "distance_km": eta_info['distance_km'],
                     "duration_minutes": int(eta_info['duration_minutes']),
                     "mode": transfer_mode,
@@ -1279,19 +1323,60 @@ class HybridOptimizerV31:
                     "is_between_days": True
                 }
                 
-                # Inyectar al inicio del día destino
+                # Verificar si ya existe un transfer similar para evitar duplicados
                 if 'transfers' not in next_day:
                     next_day['transfers'] = []
-                next_day['transfers'].insert(0, intercity_transfer)
                 
-                # Actualizar travel_summary del día destino
-                travel_summary = next_day.get('travel_summary', {})
-                travel_summary['intercity_transfers_count'] = travel_summary.get('intercity_transfers_count', 0) + 1
-                travel_summary['intercity_total_minutes'] = travel_summary.get('intercity_total_minutes', 0) + int(eta_info['duration_minutes'])
-                travel_summary['transport_time_minutes'] = travel_summary.get('transport_time_minutes', 0) + int(eta_info['duration_minutes'])
-                travel_summary['total_distance_km'] = travel_summary.get('total_distance_km', 0) + eta_info['distance_km']
+                # Buscar duplicados basados en coordenadas (más fiable que nombres)
+                transfer_exists = False
+                for existing_transfer in next_day['transfers']:
+                    if (existing_transfer.get('type') == 'intercity_transfer' and
+                        abs(existing_transfer.get('distance_km', 0) - eta_info['distance_km']) < 1.0):  # Similar distancia
+                        transfer_exists = True
+                        self.logger.debug(f"🔄 Transfer intercity duplicado evitado por distancia: {curr_base['name']} → {next_base['name']}")
+                        break
                 
-                self.logger.info(f"✅ Intercity transfer inyectado: {transfer_mode}, {int(eta_info['duration_minutes'])}min")
+                # Solo inyectar si no existe
+                if not transfer_exists:
+                    next_day['transfers'].insert(0, intercity_transfer)
+                    
+                    # Actualizar travel_summary del día destino solo si se agregó el transfer
+                    travel_summary = next_day.get('travel_summary', {})
+                    travel_summary['intercity_transfers_count'] = travel_summary.get('intercity_transfers_count', 0) + 1
+                    travel_summary['intercity_total_minutes'] = travel_summary.get('intercity_total_minutes', 0) + int(eta_info['duration_minutes'])
+                    travel_summary['transport_time_minutes'] = travel_summary.get('transport_time_minutes', 0) + int(eta_info['duration_minutes'])
+                    travel_summary['total_distance_km'] = travel_summary.get('total_distance_km', 0) + eta_info['distance_km']
+                    
+                    self.logger.info(f"✅ Intercity transfer inyectado: {transfer_mode}, {int(eta_info['duration_minutes'])}min")
+
+    async def _get_known_hotel_name(self, location: Tuple[float, float]) -> str:
+        """Verificar si las coordenadas corresponden a un hotel conocido en nuestro sistema"""
+        try:
+            self.logger.info(f"🔍 Verificando hotel conocido en ({location[0]:.6f}, {location[1]:.6f})")
+            
+            # Importar el hotel recommender para acceder a la base de datos de hoteles
+            from services.hotel_recommender import HotelRecommender
+            recommender = HotelRecommender()
+            
+            # Verificar en todas las ciudades
+            for city_name, hotels in recommender.hotel_database.items():
+                for hotel in hotels:
+                    hotel_lat = hotel.get('lat', 0)
+                    hotel_lon = hotel.get('lon', 0)
+                    
+                    # Calcular distancia (usando aproximación simple)
+                    distance = ((location[0] - hotel_lat) ** 2 + (location[1] - hotel_lon) ** 2) ** 0.5
+                    
+                    # Si está muy cerca de un hotel conocido (< 0.01 grados ≈ 1km)
+                    if distance < 0.01:
+                        self.logger.info(f"🏨 Hotel conocido encontrado: {hotel['name']} (distancia: {distance:.6f})")
+                        return hotel['name']
+                        
+        except Exception as e:
+            self.logger.warning(f"Error verificando hoteles conocidos: {e}")
+        
+        self.logger.info(f"❌ No se encontró hotel conocido en ({location[0]:.6f}, {location[1]:.6f})")
+        return ""  # No encontrado
 
     async def _get_nearest_named_place(self, location: Tuple[float, float]) -> str:
         """Obtener el nombre del lugar más cercano"""
@@ -1375,7 +1460,11 @@ class HybridOptimizerV31:
                     distance_km=eta_info['distance_km'],
                     duration_minutes=int(eta_info['duration_minutes']),
                     recommended_mode=final_mode,
-                    is_intercity=False
+                    is_intercity=False,
+                    from_lat=current_location[0],
+                    from_lon=current_location[1],
+                    to_lat=place_location[0],
+                    to_lon=place_location[1]
                 )
                 
                 # Convertir TransferItem a dict normalizado
@@ -1415,7 +1504,8 @@ class HybridOptimizerV31:
                 priority=place.get('priority', 5),
                 rating=place.get('rating', 4.5),
                 image=place.get('image', ''),
-                address=place.get('address', '')
+                address=place.get('address', ''),
+                quality_flag=place.get('quality_flag')  # Pasar quality flag
             )
             
             activities.append(activity)
@@ -1442,7 +1532,11 @@ class HybridOptimizerV31:
                     duration_minutes=int(eta_info['duration_minutes']),
                     recommended_mode=final_mode,
                     is_intercity=False,
-                    is_return_to_hotel=True  # Marcar como regreso al hotel
+                    is_return_to_hotel=True,  # Marcar como regreso al hotel
+                    from_lat=current_location[0],
+                    from_lon=current_location[1],
+                    to_lat=hotel_location[0],
+                    to_lon=hotel_location[1]
                 )
                 
                 # Convertir TransferItem a dict normalizado
@@ -1744,7 +1838,21 @@ class HybridOptimizerV31:
                 self.logger.warning(f"Error enriqueciendo sugerencia {suggestion.get('name', 'unknown')}: {e}")
                 continue
         
-        return enriched[:3]  # Máximo 3 sugerencias
+        # 🔄 DEDUPLICAR POR PLACE_ID
+        seen_place_ids = set()
+        deduplicated = []
+        
+        for suggestion in enriched:
+            place_id = suggestion.get('place_id', '')
+            if place_id and place_id in seen_place_ids:
+                self.logger.debug(f"🔄 Sugerencia duplicada evitada: {suggestion['name']} (place_id: {place_id})")
+                continue
+            
+            if place_id:
+                seen_place_ids.add(place_id)
+            deduplicated.append(suggestion)
+        
+        return deduplicated[:3]  # Máximo 3 sugerencias deduplicadas
 
     def _generate_suggestion_reason_enhanced(self, suggestion: Dict, eta_minutes: int, block_duration: int) -> str:
         """📝 Generar razón contextual mejorada para la sugerencia"""
@@ -1834,11 +1942,26 @@ class HybridOptimizerV31:
         for day in days:
             for transfer in day.get('transfers', []):
                 if transfer.get('type') == 'intercity_transfer':
+                    duration_minutes = transfer.get('duration_minutes', 60)
+                    # Formatear duración dinámicamente
+                    if duration_minutes >= 60:
+                        hours = duration_minutes // 60
+                        mins = duration_minutes % 60
+                        duration_str = f"{hours}h{mins}min" if mins > 0 else f"{hours}h"
+                    else:
+                        duration_str = f"{duration_minutes}min"
+                    
                     intercity_transfers.append({
                         'from': transfer['from'],
                         'to': transfer['to'],
+                        'from_lat': transfer.get('from_lat', 0.0),
+                        'from_lon': transfer.get('from_lon', 0.0),
+                        'to_lat': transfer.get('to_lat', 0.0),
+                        'to_lon': transfer.get('to_lon', 0.0),
                         'distance_km': transfer['distance_km'],
-                        'estimated_time_hours': transfer['duration_minutes'] / 60,
+                        'duration': duration_str,  # Duración formateada dinámicamente
+                        'duration_minutes': duration_minutes,  # Para cálculos
+                        'estimated_time_hours': duration_minutes / 60,  # Mantener compatibilidad
                         'mode': transfer['mode'],
                         'overnight': transfer.get('overnight', False)
                     })

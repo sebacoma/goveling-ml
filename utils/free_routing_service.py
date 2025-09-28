@@ -140,23 +140,24 @@ class FreeRoutingService:
         # Más de 4 decimales sugiere precisión urbana
         return (lat_precision + lon_precision) >= 8
     
-    def _validate_and_adjust_eta(self, result: Dict, actual_distance_km: float, transport_mode: str) -> Dict:
-        """Validar y ajustar ETA por coherencia"""
-        reported_distance = result.get('distance_km', actual_distance_km)
+    def _validate_and_adjust_eta(self, result: Dict, haversine_distance_km: float, transport_mode: str) -> Dict:
+        """Validar y ajustar ETA por coherencia - prioriza distancia por calles reales"""
+        reported_distance = result.get('distance_km', haversine_distance_km)
         duration_minutes = result.get('duration_minutes', 0)
         
-        # Si la diferencia de distancia es muy grande, usar la real
-        distance_diff = abs(reported_distance - actual_distance_km)
-        if distance_diff > actual_distance_km * 0.5:  # Más de 50% de diferencia
-            self.logger.warning(f"📏 Distancia reportada {reported_distance:.1f}km vs real {actual_distance_km:.1f}km - usando real")
-            result['distance_km'] = actual_distance_km
-            
-            # Recalcular duración basada en velocidad implícita
-            if duration_minutes > 0:
-                implied_speed = (reported_distance / duration_minutes) * 60
-                adjusted_duration = (actual_distance_km / implied_speed) * 60 if implied_speed > 0 else duration_minutes
-                result['duration_minutes'] = adjusted_duration
-                result['adjusted'] = True
+        # Validar coherencia de distancias pero mantener la reportada por APIs
+        distance_diff = abs(reported_distance - haversine_distance_km)
+        if distance_diff > 0.1:  # Diferencia > 100m
+            self.logger.info(f"📏 Discrepancia: API={reported_distance:.1f}km vs línea_recta={haversine_distance_km:.1f}km - usando distancia por calles")
+            # Mantener la distancia reportada por API (más precisa para rutas reales)
+            # Solo usar Haversine si la discrepancia es extrema (>200% diferencia)
+            if distance_diff > haversine_distance_km * 2.0:
+                self.logger.warning(f"⚠️ Discrepancia extrema detectada - usando distancia Haversine como fallback")
+                result['distance_km'] = haversine_distance_km
+                result['fallback_to_haversine'] = True
+            else:
+                # Mantener distancia por calles (reportada por API)
+                result['distance_validated'] = True
         
         # Validar velocidades mínimas/máximas razonables
         if duration_minutes > 0:
