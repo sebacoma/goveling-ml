@@ -1286,51 +1286,7 @@ async def recommend_hotels_endpoint(request: HotelRecommendationRequest):
             detail=f"Error generating hotel recommendations: {str(e)}"
         )
 
-@app.post("/api/v2/places/suggest")
-async def suggest_places_endpoint(coords: Coordinates):
-    """
-    🌍 Sugerir lugares para visitar cerca de una ubicación
-    
-    Analiza la ubicación proporcionada y sugiere lugares interesantes 
-    cercanos, categorizados por tipo de actividad.
-    """
-    try:
-        start_time = time_module.time()
-        
-        # Inicializar servicio de Google Places
-        places_service = GooglePlacesService()
-        
-        # Generar sugerencias
-        suggestions = places_service.generate_day_suggestions(
-            lat=coords.latitude,
-            lon=coords.longitude
-        )
-        
-        # Métricas de rendimiento
-        duration = time_module.time() - start_time
-        
-        # Añadir métricas al resultado
-        suggestions["performance"] = {
-            "processing_time_s": round(duration, 2),
-            "generated_at": datetime.now().isoformat(),
-            "coordinates": {
-                "latitude": coords.latitude,
-                "longitude": coords.longitude
-            }
-        }
-        
-        logging.info(f"🌍 Sugerencias de lugares generadas en {duration:.2f}s")
-        
-        return suggestions
-        
-    except Exception as e:
-        logging.error(f"❌ Error generando sugerencias de lugares: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating place suggestions: {str(e)}"
-        )
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -206,8 +206,7 @@ Genera un itinerario optimizado usando el algoritmo híbrido V3.1 con sugerencia
 #### `POST /api/v2/hotels/recommend`
 Obtiene recomendaciones de hoteles para lugares específicos.
 
-#### `POST /api/v2/places/search-nearby`
-Busca lugares cercanos usando Google Places API mejorado.
+> **💡 Nota:** Los lugares cercanos y sugerencias se incluyen automáticamente en el endpoint principal `/api/v2/itinerary/generate-hybrid` dentro de los `free_blocks` de cada día. No es necesario un endpoint separado.
 
 ### 📝 Documentación Interactiva
 Accede a la documentación completa en:
