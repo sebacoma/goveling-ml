@@ -194,6 +194,11 @@ class HybridOptimizerV31:
             ]
             self.logger.info(f"🏨 Accommodations encontradas en lugares originales: {len(all_accommodations)}")
             
+            # DEBUG: Mostrar detalles de accommodations encontradas
+            for i, acc in enumerate(all_accommodations):
+                auto_flag = acc.get('_auto_recommended', False)
+                self.logger.info(f"🔍 DEBUG Accommodation {i+1}: {acc.get('name', 'Sin nombre')} (_auto_recommended: {auto_flag})")
+            
             # Para cada accommodation, asignarla al cluster más cercano
             for accommodation in all_accommodations:
                 closest_cluster = None
@@ -212,8 +217,14 @@ class HybridOptimizerV31:
                 # Asignar accommodation al cluster más cercano si no tiene base aún
                 if closest_cluster and not closest_cluster.home_base:
                     closest_cluster.home_base = accommodation.copy()
-                    closest_cluster.home_base_source = "auto_detected_in_original_places"
-                    self.logger.info(f"  ✅ Cluster {closest_cluster.label}: {accommodation['name']} (detectado en lugares originales, distancia: {min_distance:.1f}km)")
+                    
+                    # Verificar si fue agregado automáticamente por nuestro sistema
+                    if accommodation.get('_auto_recommended', False):
+                        closest_cluster.home_base_source = "auto_recommended_by_system"
+                        self.logger.info(f"  ✅ Cluster {closest_cluster.label}: {accommodation['name']} (recomendado automáticamente por el sistema, distancia: {min_distance:.1f}km)")
+                    else:
+                        closest_cluster.home_base_source = "auto_detected_in_original_places"
+                        self.logger.info(f"  ✅ Cluster {closest_cluster.label}: {accommodation['name']} (detectado en lugares originales, distancia: {min_distance:.1f}km)")
         
         # 2. Asignar accommodations del usuario a clusters sin base
         if accommodations:
@@ -910,7 +921,8 @@ class HybridOptimizerV31:
         daily_window: TimeWindow,
         transport_mode: str,
         previous_day_end_location: Optional[Tuple[float, float]] = None,
-        day_number: int = 1
+        day_number: int = 1,
+        extra_info: Optional[Dict] = None
     ) -> Dict:
         """🗓️ Routing mejorado con transfers con nombres reales"""
         self.logger.info(f"🗓️ Routing día {date} con {len(assigned_clusters)} clusters")
@@ -948,27 +960,38 @@ class HybridOptimizerV31:
                 description: str = ""
                 rating: float = 0.0
                 address: str = ""
+            
+            # Obtener nombre del hotel base del primer cluster
+            main_cluster = assigned_clusters[0]
+            hotel_name = "hotel"
+            hotel_rating = 4.5
+            hotel_address = "Hotel base del viaje"
+            
+            if main_cluster.home_base:
+                hotel_name = main_cluster.home_base.get('name', 'hotel')
+                hotel_rating = main_cluster.home_base.get('rating', 4.5)
+                hotel_address = main_cluster.home_base.get('address', 'Hotel base del viaje')
                 
             # Agregar actividad de check-in o llegada al hotel
             hotel_activity = HotelActivity(
                 type="accommodation",
-                name="Check-in al hotel",
+                name=f"Check-in al {hotel_name}",
                 lat=current_location[0],
                 lon=current_location[1], 
                 place_type="hotel",
                 duration_minutes=30,
                 start_time=current_time,
                 end_time=current_time + 30,
-                description="Llegada y check-in al hotel base",
-                rating=4.5,
-                address="Hotel base del viaje"
+                description=f"Llegada y check-in al {hotel_name}",
+                rating=hotel_rating,
+                address=hotel_address
             )
             
             timeline.append(hotel_activity)
             activities_scheduled.append(hotel_activity)
             current_time += 30  # Tiempo para check-in
             
-            self.logger.info(f"🏨 Primer día - agregando check-in al hotel ({current_time//60:02d}:{current_time%60:02d})")
+            self.logger.info(f"🏨 Primer día - agregando check-in al {hotel_name} ({current_time//60:02d}:{current_time%60:02d})")
         
         # Métricas separadas
         walking_time = 0
@@ -1118,7 +1141,7 @@ class HybridOptimizerV31:
             "transfers": transfers,
             "free_blocks": free_blocks,
             "actionable_recommendations": actionable_recommendations,
-            "base": assigned_clusters[0].home_base if assigned_clusters else None,
+            "base": self._build_enhanced_base_info(assigned_clusters[0], extra_info) if assigned_clusters else None,
             "travel_summary": {
                 "total_travel_time_s": total_travel_time * 60,
                 "total_distance_km": total_distance,
@@ -1397,7 +1420,34 @@ class HybridOptimizerV31:
             self.logger.warning(f"No se pudo obtener nombre del lugar: {e}")
         
         return f"Lat {location[0]:.3f}, Lon {location[1]:.3f}"
-    
+
+    def _build_enhanced_base_info(self, cluster: Cluster, extra_info: Optional[Dict] = None) -> Dict:
+        """Construir información completa del base incluyendo si fue recomendado automáticamente"""
+        if not cluster.home_base:
+            return None
+            
+        # Copiar la información básica del home_base
+        base_info = cluster.home_base.copy()
+        
+        # Determinar si fue recomendado automáticamente
+        no_original_accommodations = extra_info and extra_info.get('no_original_accommodations', False)
+        
+        # Si no había acomodaciones originales, marcar como auto-recomendado
+        if no_original_accommodations:
+            is_auto_recommended = True
+            recommendation_source = "auto_recommended_by_system"
+        else:
+            # Usar la lógica original basada en home_base_source
+            is_auto_recommended = cluster.home_base_source in ["recommended", "auto_recommended_by_system"]
+            recommendation_source = cluster.home_base_source
+            
+        base_info["auto_recommended"] = is_auto_recommended
+        base_info["recommendation_source"] = recommendation_source
+        
+        self.logger.info(f"🏨 Base info: {base_info.get('name', 'Unknown')} (source: {cluster.home_base_source}, auto_recommended: {is_auto_recommended})")
+        
+        return base_info
+
     def _decide_mode_by_distance_km(self, distance_km: float, requested_mode: str) -> str:
         """Política de transporte estricta"""
         if distance_km <= settings.WALK_THRESHOLD_KM:
@@ -2216,7 +2266,8 @@ async def optimize_itinerary_hybrid_v31(
     daily_end_hour: int = 18,
     transport_mode: str = 'walk',
     accommodations: Optional[List[Dict]] = None,
-    packing_strategy: str = "balanced"
+    packing_strategy: str = "balanced",
+    extra_info: Optional[Dict] = None
 ) -> Dict:
     """
     🚀 HYBRID OPTIMIZER V3.1 - ENHANCED VERSION
@@ -2319,7 +2370,7 @@ async def optimize_itinerary_hybrid_v31(
             start_location = first_day_hotel
             
         day_result = await optimizer.route_day_enhanced(
-            date_str, assigned_clusters, time_window, transport_mode, start_location, day_number
+            date_str, assigned_clusters, time_window, transport_mode, start_location, day_number, extra_info
         )
         days.append(day_result)
         previous_end_location = day_result.get('end_location')
@@ -2345,7 +2396,7 @@ async def optimize_itinerary_hybrid_v31(
         "clusters_info": {
             "total_clusters": len(clusters),
             "hotels_assigned": sum(1 for c in clusters if c.home_base_source != "none"),
-            "recommended_hotels": sum(1 for c in clusters if c.home_base_source == "recommended"),
+            "recommended_hotels": sum(1 for c in clusters if c.home_base_source in ["recommended", "auto_recommended_by_system"]),
             "packing_strategy_used": packing_strategy
         },
         "additional_recommendations": {
@@ -2369,11 +2420,12 @@ async def optimize_itinerary_hybrid(
     daily_start_hour: int = 9,
     daily_end_hour: int = 18,
     transport_mode: str = 'walk',
-    accommodations: Optional[List[Dict]] = None
+    accommodations: Optional[List[Dict]] = None,
+    extra_info: Optional[Dict] = None
 ) -> Dict:
     """Wrapper para mantener compatibilidad"""
     return await optimize_itinerary_hybrid_v31(
         places, start_date, end_date, daily_start_hour, 
         daily_end_hour, transport_mode, accommodations,
-        settings.DEFAULT_PACKING_STRATEGY
+        settings.DEFAULT_PACKING_STRATEGY, extra_info
     )

@@ -262,7 +262,61 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     'priority': 5
                 })
         
-        # 🔍 Detectar si se enviaron hoteles/alojamientos  
+        # 🏨 DETECCIÓN Y RECOMENDACIÓN AUTOMÁTICA DE ACCOMMODATIONS
+        # 1. Detectar si hay accommodations en places ORIGINALES
+        accommodations_in_places = [
+            place for place in normalized_places 
+            if place.get('type', '').lower() == 'accommodation' or place.get('place_type', '').lower() == 'accommodation'
+        ]
+        
+        # 2. Flag para indicar si NO había accommodations originalmente
+        no_original_accommodations = len(accommodations_in_places) == 0 and not request.accommodations
+        
+        # 3. Si no hay accommodations, recomendar automáticamente
+        if no_original_accommodations:
+            logger.info("🤖 No se encontraron accommodations, recomendando hotel automáticamente...")
+            try:
+                from services.hotel_recommender import HotelRecommender
+                hotel_recommender = HotelRecommender()
+                
+                # Recomendar el mejor hotel basado en los lugares de entrada
+                recommendations = hotel_recommender.recommend_hotels(
+                    normalized_places, 
+                    max_recommendations=1, 
+                    price_preference="mid"
+                )
+                
+                if recommendations:
+                    best_hotel = recommendations[0]
+                    # Agregar el hotel recomendado a la lista de lugares
+                    hotel_place = {
+                        'name': best_hotel.name,
+                        'lat': best_hotel.lat,
+                        'lon': best_hotel.lon,
+                        'type': 'accommodation',
+                        'place_type': 'accommodation',
+                        'rating': best_hotel.rating,
+                        'address': best_hotel.address,
+                        'category': 'accommodation',
+                        'user_ratings_total': 100,  # Valor por defecto
+                        'description': f"Hotel recomendado automáticamente: {best_hotel.name}",
+                        'estimated_time': '1h',
+                        'image': '',
+                        'website': '',
+                        'phone': '',
+                        'priority': 5,
+                        '_auto_recommended': True  # FLAG para identificar hoteles recomendados automáticamente
+                    }
+                    normalized_places.append(hotel_place)
+                    logger.info(f"✅ Hotel recomendado agregado: {best_hotel.name} ({best_hotel.rating}⭐)")
+                    logger.info(f"🔍 DEBUG: Hotel agregado con _auto_recommended=True y {len(normalized_places)} lugares totales")
+                else:
+                    logger.warning("⚠️ No se pudo recomendar ningún hotel automáticamente")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error recomendando hotel automáticamente: {e}")
+        
+        # 🔍 Detectar si se enviaron hoteles/alojamientos explícitamente
         accommodations_data = None
         hotels_provided = False
         
@@ -311,6 +365,11 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     "attempt": attempt + 1
                 })
                 
+                # Pasar información extra al optimizer
+                extra_info = {
+                    'no_original_accommodations': no_original_accommodations
+                }
+                
                 optimization_result = await optimize_itinerary_hybrid(
                     normalized_places,
                     start_date,
@@ -318,7 +377,8 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     request.daily_start_hour,
                     request.daily_end_hour,
                     request.transport_mode,
-                    accommodations_data
+                    accommodations_data,
+                    extra_info=extra_info
                 )
                 
                 # 🛡️ Validar resultado antes de continuar
