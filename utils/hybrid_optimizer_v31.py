@@ -2035,10 +2035,9 @@ class HybridOptimizerV31:
     # =========================================================================
     
     def allocate_clusters_to_days(self, clusters: List[Cluster], start_date: datetime, end_date: datetime) -> Dict[str, List[Cluster]]:
-        """Enhanced method - distribuye actividades inteligentemente"""
+        """🧠 SMART DISTRIBUTION - Distribución inteligente basada en contexto"""
         num_days = (end_date - start_date).days + 1
-        cluster_distances = self._calculate_inter_cluster_distances(clusters)
-        intercity_threshold = self._get_intercity_threshold(clusters)
+        total_places = sum(len(cluster.places) for cluster in clusters)
         
         day_assignments = {}
         current_date = start_date
@@ -2048,56 +2047,141 @@ class HybridOptimizerV31:
             day_assignments[date_str] = []
             current_date += timedelta(days=1)
         
-        # 🧠 NUEVA LÓGICA: Distribución inteligente por proximidad y tipo
+        # 🎯 DECISIÓN CONTEXTUAL: ¿Qué estrategia usar?
+        days_per_place_ratio = num_days / max(total_places, 1)
+        
+        self.logger.info(f"📊 Contexto: {total_places} lugares, {num_days} días (ratio: {days_per_place_ratio:.1f})")
+        
+        if days_per_place_ratio >= 1.5:
+            # MODO RELAJADO: Mucho tiempo disponible - espaciar actividades
+            self.logger.info("😌 MODO RELAJADO: Espaciando actividades (1 lugar por día máximo)")
+            return self._distribute_relaxed_mode(clusters, day_assignments)
+            
+        elif days_per_place_ratio >= 0.8:
+            # MODO BALANCEADO: Tiempo moderado - agrupar cercanos inteligentemente  
+            self.logger.info("⚖️ MODO BALANCEADO: Agrupando lugares cercanos inteligentemente")
+            return self._distribute_balanced_mode(clusters, day_assignments)
+            
+        else:
+            # MODO INTENSIVO: Poco tiempo - maximizar eficiencia geográfica
+            self.logger.info("🏃 MODO INTENSIVO: Maximizando eficiencia geográfica")
+            return self._distribute_intensive_mode(clusters, day_assignments)
+    
+    def _distribute_relaxed_mode(self, clusters: List[Cluster], day_assignments: Dict[str, List[Cluster]]) -> Dict[str, List[Cluster]]:
+        """😌 Distribución relajada: 1 lugar por día máximo"""
+        day_keys = list(day_assignments.keys())
+        day_idx = 0
+        
         for cluster in clusters:
-            if len(cluster.places) <= 1:
-                # Cluster pequeño - asignar completo
+            for place in cluster.places:
+                # Crear mini-cluster individual
+                mini_cluster = Cluster(
+                    label=f"relaxed_{place['name'][:20]}",
+                    centroid=(place['lat'], place['lon']),
+                    places=[place],
+                    home_base=cluster.home_base
+                )
+                
+                # Asignar a día disponible
+                if day_idx < len(day_keys):
+                    day_assignments[day_keys[day_idx]].append(mini_cluster)
+                    day_idx += 1
+                else:
+                    # Si se acabaron los días, usar el día con menos actividades
+                    min_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
+                    day_assignments[min_day].append(mini_cluster)
+        
+        return day_assignments
+    
+    def _distribute_balanced_mode(self, clusters: List[Cluster], day_assignments: Dict[str, List[Cluster]]) -> Dict[str, List[Cluster]]:
+        """⚖️ Distribución balanceada: Usa evaluación inteligente de rutas múltiples"""
+        day_keys = list(day_assignments.keys())
+        
+        for cluster in clusters:
+            if len(cluster.places) == 1:
+                # Lugar individual - asignar directamente
                 min_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
                 day_assignments[min_day].append(cluster)
-            else:
-                # Cluster grande - verificar proximidad y tipo
-                place_types = [p.get('type', '') for p in cluster.places]
                 
-                if len(set(place_types)) == 1 and place_types[0] == 'restaurant':
-                    # Todos restaurantes - verificar si están cerca para agrupar
-                    max_intra_distance = self._calculate_max_intra_cluster_distance(cluster.places)
-                    
-                    if max_intra_distance <= 5.0:  # Mismo barrio/zona (≤5km)
-                        self.logger.info(f"🍽️ {len(cluster.places)} restaurantes cercanos (max {max_intra_distance:.1f}km) - agrupando máximo 2 por día")
-                        day_keys = list(day_assignments.keys())
-                        
-                        # Agrupar máximo 2 restaurantes por día
-                        for i in range(0, len(cluster.places), 2):
-                            places_for_day = cluster.places[i:i+2]
-                            
-                            mini_cluster = Cluster(
-                                label=f"{cluster.label}_group_{i//2}",
-                                centroid=cluster.centroid,
-                                places=places_for_day,
-                                home_base=cluster.home_base
-                            )
-                            
-                            day_idx = (i//2) % len(day_keys)
-                            day_assignments[day_keys[day_idx]].append(mini_cluster)
-                    else:
-                        self.logger.info(f"🍽️ {len(cluster.places)} restaurantes dispersos (max {max_intra_distance:.1f}km) - distribuyendo 1 por día")
-                        day_keys = list(day_assignments.keys())
-                        
-                        for i, place in enumerate(cluster.places):
-                            # Crear mini-cluster para cada restaurante
-                            mini_cluster = Cluster(
-                                label=f"{cluster.label}_split_{i}",
-                                centroid=cluster.centroid,
-                                places=[place],
-                                home_base=cluster.home_base
-                            )
-                            
-                            day_idx = i % len(day_keys)
-                            day_assignments[day_keys[day_idx]].append(mini_cluster)
-                else:
-                    # Cluster mixto - asignar completo
+            else:
+                # 🗺️ Evaluación inteligente de rutas múltiples
+                hotel_location = cluster.home_base if cluster.home_base else None
+                route_analysis = self._evaluate_route_sequences(cluster.places, hotel_location)
+                
+                suggestion = route_analysis["optimization_suggestion"]
+                avg_distance = route_analysis["place_to_place_avg"]
+                max_distance = route_analysis["place_to_place_max"]
+                
+                self.logger.info(f"🔍 Cluster {cluster.label}: {len(cluster.places)} lugares")
+                self.logger.info(f"📊 Análisis rutas: avg={avg_distance:.1f}km, max={max_distance:.1f}km")
+                self.logger.info(f"💡 Sugerencia: {suggestion}")
+                
+                if suggestion == "group_same_day":
+                    # Agrupar todos en el mismo día
+                    self.logger.info(f"📍 Lugares muy cercanos - agrupando en mismo día")
                     min_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
                     day_assignments[min_day].append(cluster)
+                    
+                elif suggestion == "group_pairs":
+                    # Agrupar de a pares
+                    self.logger.info(f"🚶 Lugares cercanos - agrupando de a pares")
+                    for i in range(0, len(cluster.places), 2):
+                        places_for_day = cluster.places[i:i+2]
+                        
+                        mini_cluster = Cluster(
+                            label=f"{cluster.label}_pair_{i//2}",
+                            centroid=cluster.centroid,
+                            places=places_for_day,
+                            home_base=cluster.home_base
+                        )
+                        
+                        min_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
+                        day_assignments[min_day].append(mini_cluster)
+                        
+                elif suggestion in ["distribute", "distribute_far"]:
+                    # Distribuir 1 por día con estrategia inteligente
+                    self.logger.info(f"🌍 Distribuyendo lugares ({suggestion})")
+
+                    if suggestion == "distribute_far":
+                        # Para lugares muy lejanos, intentar equilibrar mejor las distancias
+                        sorted_places = sorted(cluster.places, key=lambda p: 
+                            sum(haversine_km(p['lat'], p['lon'], other['lat'], other['lon']) 
+                                for other in cluster.places if other != p))
+                    else:
+                        sorted_places = cluster.places
+                    for i, place in enumerate(sorted_places):
+                        mini_cluster = Cluster(
+                            label=f"{cluster.label}_single_{i}",
+                            centroid=(place['lat'], place['lon']),
+                            places=[place],
+                            home_base=cluster.home_base
+                        )
+                        
+                        # Distribución más inteligente                        day_idx = i % len(day_keys)
+                        day_assignments[day_keys[day_idx]].append(mini_cluster)
+                        
+                else:
+                    # Fallback a distribución simple
+                    self.logger.warning(f"⚠️ Sugerencia desconocida '{suggestion}' - usando distribución simple")
+                    for i, place in enumerate(cluster.places):
+                        mini_cluster = Cluster(
+                            label=f"{cluster.label}_fallback_{i}",
+                            centroid=(place['lat'], place['lon']),
+                            places=[place],
+                            home_base=cluster.home_base
+                        )
+                        
+                        day_idx = i % len(day_keys)
+                        day_assignments[day_keys[day_idx]].append(mini_cluster)
+        
+        return day_assignments
+    
+    def _distribute_intensive_mode(self, clusters: List[Cluster], day_assignments: Dict[str, List[Cluster]]) -> Dict[str, List[Cluster]]:
+        """🏃 Distribución intensiva: Maximizar eficiencia geográfica"""
+        for cluster in clusters:
+            # En modo intensivo, mantener clusters originales para máxima eficiencia
+            min_day = min(day_assignments.keys(), key=lambda d: len(day_assignments[d]))
+            day_assignments[min_day].append(cluster)
         
         return day_assignments
     
@@ -2131,6 +2215,102 @@ class HybridOptimizerV31:
                 distances[key] = distance
         
         return distances
+    
+    def _evaluate_route_sequences(self, places: List[Dict], hotel_location: Optional[Dict] = None) -> Dict:
+        """
+        🗺️ Evaluación inteligente de secuencias de rutas múltiples
+        
+        Evalúa todas las combinaciones posibles de rutas:
+        - Hotel → Lugar
+        - Lugar → Lugar  
+        - Lugar → Hotel
+        - Transferencias intercity
+        
+        Retorna métricas para tomar decisiones inteligentes de agrupación
+        """
+        if not places:
+            return {"total_distance": 0, "sequences": [], "optimization_suggestion": "none"}
+        
+        sequences = []
+        total_distance = 0
+        
+        # 1. Evaluar rutas Hotel → Lugar (si hay hotel)
+        if hotel_location:
+            for place in places:
+                distance = haversine_km(
+                    hotel_location['lat'], hotel_location['lon'],
+                    place['lat'], place['lon']
+                )
+                sequences.append({
+                    "type": "hotel_to_place",
+                    "from": hotel_location.get('name', 'Hotel'),
+                    "to": place.get('name', 'Lugar'),
+                    "distance": distance
+                })
+                total_distance += distance
+        
+        # 2. Evaluar rutas Lugar → Lugar
+        place_to_place_distances = []
+        for i, place_a in enumerate(places):
+            for j, place_b in enumerate(places[i+1:], i+1):
+                distance = haversine_km(
+                    place_a['lat'], place_a['lon'],
+                    place_b['lat'], place_b['lon']
+                )
+                place_to_place_distances.append(distance)
+                sequences.append({
+                    "type": "place_to_place",
+                    "from": place_a.get('name', f'Lugar {i+1}'),
+                    "to": place_b.get('name', f'Lugar {j+1}'),
+                    "distance": distance
+                })
+        
+        # 3. Evaluar rutas Lugar → Hotel (si hay hotel)
+        if hotel_location:
+            for place in places:
+                distance = haversine_km(
+                    place['lat'], place['lon'],
+                    hotel_location['lat'], hotel_location['lon']
+                )
+                sequences.append({
+                    "type": "place_to_hotel",
+                    "from": place.get('name', 'Lugar'),
+                    "to": hotel_location.get('name', 'Hotel'),
+                    "distance": distance
+                })
+        
+        # 4. Análisis y recomendaciones
+        avg_place_distance = sum(place_to_place_distances) / len(place_to_place_distances) if place_to_place_distances else 0
+        max_place_distance = max(place_to_place_distances) if place_to_place_distances else 0
+        min_place_distance = min(place_to_place_distances) if place_to_place_distances else 0
+        
+        # Determinar estrategia óptima
+        optimization_suggestion = "distribute"  # Por defecto
+        
+        if len(places) <= 2:
+            optimization_suggestion = "group_same_day"
+        elif avg_place_distance <= 2.0:
+            optimization_suggestion = "group_same_day"  # Muy cercanos
+        elif avg_place_distance <= 5.0 and max_place_distance <= 8.0:
+            optimization_suggestion = "group_pairs"  # Agrupar de a pares
+        elif max_place_distance > 15.0:
+            optimization_suggestion = "distribute_far"  # Distribuir lugares lejanos
+        else:
+            optimization_suggestion = "distribute"  # Distribución normal
+        
+        return {
+            "total_distance": total_distance,
+            "sequences": sequences,
+            "place_to_place_avg": avg_place_distance,
+            "place_to_place_max": max_place_distance,
+            "place_to_place_min": min_place_distance,
+            "optimization_suggestion": optimization_suggestion,
+            "analysis": {
+                "total_routes_evaluated": len(sequences),
+                "hotel_routes": len([s for s in sequences if s["type"] in ["hotel_to_place", "place_to_hotel"]]),
+                "place_routes": len([s for s in sequences if s["type"] == "place_to_place"])
+            }
+        }
     
     def _get_intercity_threshold(self, clusters: List[Cluster]) -> float:
         """Determinar umbral intercity"""
