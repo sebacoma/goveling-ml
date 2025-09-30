@@ -13,6 +13,10 @@ Mejoras implementadas:
 import math
 import asyncio
 import logging
+import asyncio
+import json
+import time
+import os
 from typing import List, Dict, Tuple, Optional, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -25,6 +29,81 @@ from services.hotel_recommender import HotelRecommender
 from services.google_places_service import GooglePlacesService
 from utils.google_cache import cache_google_api, parallel_google_calls
 from settings import settings
+
+# =========================================================================
+# CUSTOM EXCEPTIONS FOR ROBUST ERROR HANDLING
+# =========================================================================
+
+class OptimizerError(Exception):
+    """Base exception for optimizer errors"""
+    pass
+
+class RoutingServiceError(OptimizerError):
+    """Routing service related errors"""
+    pass
+
+class GooglePlacesError(OptimizerError):
+    """Google Places API related errors"""
+    pass
+
+class QuotaExceededError(GooglePlacesError):
+    """API quota exceeded"""
+    pass
+
+class CircuitBreakerOpenError(OptimizerError):
+    """Circuit breaker is open"""
+    pass
+
+class InvalidCoordinatesError(OptimizerError):
+    """Invalid coordinates provided"""
+    pass
+
+# =========================================================================
+# CIRCUIT BREAKER PATTERN
+# =========================================================================
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, timeout=30, recovery_timeout=60):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self._state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        
+    def is_open(self):
+        if self._state == "OPEN":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self._state = "HALF_OPEN"
+                return False
+            return True
+        return False
+        
+    def record_success(self):
+        self.failure_count = 0
+        self._state = "CLOSED"
+        
+    def record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.failure_count >= self.failure_threshold:
+            self._state = "OPEN"
+    
+    def is_closed(self):
+        """Verificar si el circuit breaker está cerrado (funcionando normalmente)"""
+        return self._state == "CLOSED"
+            
+    async def call(self, func, *args, **kwargs):
+        if self.is_open():
+            raise CircuitBreakerOpenError(f"Circuit breaker is open for {func.__name__}")
+            
+        try:
+            result = await asyncio.wait_for(func(*args, **kwargs), timeout=self.timeout)
+            self.record_success()
+            return result
+        except Exception as e:
+            self.record_failure()
+            raise
 
 @dataclass
 class TimeWindow:
@@ -90,6 +169,803 @@ class HybridOptimizerV31:
         self.places_service = GooglePlacesService()
         self.logger = logging.getLogger(__name__)
         
+        # 🛡️ Robustez: Circuit breakers para APIs externas
+        self.routing_circuit_breaker = CircuitBreaker(failure_threshold=3, timeout=15, recovery_timeout=60)
+        self.places_circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=20, recovery_timeout=120)
+        
+        # Circuit breaker principal (alias para compatibilidad con tests)
+        self.circuit_breaker = self.places_circuit_breaker
+        
+        # 🔧 Configuración robusta
+        self.max_retries = 3
+        self.backoff_factor = 2
+        self.emergency_fallback_enabled = True
+        
+        # 🚀 Cache de performance para distancias
+        self.distance_cache = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
+        
+        # 📦 Batch processing configuration
+        self.batch_size = 5
+        self.max_concurrent_requests = 10
+        self.batch_delay = 0.1  # 100ms entre batches
+        
+        # ⚡ Lazy loading configuration
+        self.immediate_days_threshold = 3
+        self.lazy_placeholders = {}
+        
+        # 💾 Persistent cache (inicializado vacío)
+        self.persistent_cache = {}
+        
+        # 💾 Cargar cache persistente al inicializar
+        self.load_persistent_cache()
+        
+    # =========================================================================
+    # 🛡️ ROBUST API WRAPPERS - ERROR HANDLING GRANULAR
+    # =========================================================================
+    
+    async def routing_service_robust(self, origin: Tuple[float, float], destination: Tuple[float, float], mode: str = 'walk'):
+        """🚗 Routing service robusto con fallbacks múltiples"""
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Usar circuit breaker para proteger API
+                result = await self.routing_circuit_breaker.call(
+                    self.routing_service.eta_between, origin, destination, mode
+                )
+                return result
+                
+            except CircuitBreakerOpenError:
+                self.logger.warning(f"⚡ Circuit breaker abierto para routing - usando fallback directo")
+                return self._emergency_routing_fallback(origin, destination, mode)
+                
+            except (asyncio.TimeoutError, ConnectionError) as e:
+                self.logger.warning(f"🌐 Routing API timeout/conexión (intento {attempt + 1}): {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff_factor ** attempt)
+                    continue
+                return self._emergency_routing_fallback(origin, destination, mode)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Routing error crítico (intento {attempt + 1}): {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff_factor ** attempt)
+                    continue
+                return self._emergency_routing_fallback(origin, destination, mode)
+        
+        # Si llegamos aquí, usar fallback de emergencia
+        return self._emergency_routing_fallback(origin, destination, mode)
+    
+    async def places_service_robust(self, lat: float, lon: float, **kwargs):
+        """🏪 Google Places service robusto con fallbacks"""
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Usar circuit breaker para proteger API
+                result = await self.places_circuit_breaker.call(
+                    self.places_service.search_nearby, lat, lon, **kwargs
+                )
+                return result
+                
+            except CircuitBreakerOpenError:
+                self.logger.warning(f"⚡ Circuit breaker abierto para Google Places - usando fallback")
+                return self._emergency_places_fallback(lat, lon, **kwargs)
+                
+            except QuotaExceededError:
+                self.logger.error("💰 Cuota Google Places excedida - usando fallback sintético")
+                return self._synthetic_places_fallback(lat, lon, **kwargs)
+                
+            except (asyncio.TimeoutError, ConnectionError) as e:
+                self.logger.warning(f"🌐 Places API timeout/conexión (intento {attempt + 1}): {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff_factor ** attempt)
+                    continue
+                return self._emergency_places_fallback(lat, lon, **kwargs)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Places error crítico (intento {attempt + 1}): {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff_factor ** attempt)
+                    continue
+                return self._emergency_places_fallback(lat, lon, **kwargs)
+        
+        # Si llegamos aquí, usar fallback de emergencia
+        return self._emergency_places_fallback(lat, lon, **kwargs)
+    
+    def _emergency_routing_fallback(self, origin: Tuple[float, float], destination: Tuple[float, float], mode: str):
+        """⚡ Fallback de emergencia para routing usando distancia euclidiana"""
+        from utils.geo_utils import haversine_km
+        
+        distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
+        
+        # Estimaciones conservadoras basadas en modo de transporte
+        speed_estimates = {
+            'walk': 4,      # 4 km/h
+            'bicycle': 15,   # 15 km/h  
+            'drive': 30,     # 30 km/h (considerando tráfico urbano)
+            'transit': 20    # 20 km/h (metro + caminata)
+        }
+        
+        speed = speed_estimates.get(mode, 4)
+        duration_hours = distance_km / speed
+        duration_minutes = int(duration_hours * 60)
+        
+        self.logger.info(f"🚨 Fallback routing: {distance_km:.1f}km, {duration_minutes}min ({mode})")
+        
+        return {
+            'duration_minutes': max(duration_minutes, 5),  # Mínimo 5 min
+            'distance_km': distance_km,
+            'fallback_used': True,
+            'fallback_reason': 'routing_service_unavailable'
+        }
+    
+    def _emergency_places_fallback(self, lat: float, lon: float, **kwargs):
+        """⚡ Fallback de emergencia para places - lugares sintéticos básicos"""
+        radius = kwargs.get('radius', 1000)
+        place_type = kwargs.get('type', 'point_of_interest')
+        
+        # Generar lugares sintéticos básicos en un radio
+        fallback_places = []
+        for i in range(3):  # 3 lugares básicos
+            # Offset pequeño aleatorio
+            lat_offset = (i - 1) * 0.005  # ~500m
+            lon_offset = (i - 1) * 0.005
+            
+            fallback_places.append({
+                'name': f'Lugar {i + 1}',
+                'lat': lat + lat_offset,
+                'lon': lon + lon_offset,
+                'type': place_type,
+                'rating': 4.0,
+                'fallback_generated': True,
+                'address': 'Dirección no disponible',
+                'place_id': f'fallback_{lat}_{lon}_{i}'
+            })
+        
+        self.logger.info(f"🚨 Places fallback: {len(fallback_places)} lugares sintéticos generados")
+        
+        return fallback_places
+    
+    def _synthetic_places_fallback(self, lat: float, lon: float, **kwargs):
+        """🎭 Fallback sintético más elaborado para Places API"""
+        place_type = kwargs.get('type', 'point_of_interest')
+        types = kwargs.get('types', [place_type])
+        
+        # Lugares sintéticos según tipo
+        synthetic_templates = {
+            'restaurant': ['Restaurante local', 'Café', 'Comida rápida'],
+            'tourist_attraction': ['Sitio histórico', 'Mirador', 'Plaza'],
+            'lodging': ['Hotel', 'Hostal', 'Casa de huéspedes'],
+            'point_of_interest': ['Lugar de interés', 'Centro comercial', 'Parque']
+        }
+        
+        # Usar el primer tipo de la lista
+        primary_type = types[0] if types else place_type
+        templates = synthetic_templates.get(primary_type, synthetic_templates['point_of_interest'])
+        
+        synthetic_places = []
+        for i, template in enumerate(templates):
+            lat_offset = (i - 1) * 0.003
+            lon_offset = (i - 1) * 0.003
+            
+            synthetic_places.append({
+                'name': template,
+                'lat': lat + lat_offset,
+                'lon': lon + lon_offset,
+                'type': primary_type,
+                'rating': 4.0 + (i * 0.1),
+                'synthetic': True,
+                'address': 'Dirección no disponible',
+                'place_id': f'synthetic_{primary_type}_{i}_{int(time.time())}'
+            })
+        
+        self.logger.info(f"🎭 Synthetic places: {len(synthetic_places)} {primary_type} generados")
+        return synthetic_places
+    
+    async def places_service_real_robust(self, lat: float, lon: float, **kwargs):
+        """🏨 Google Places REAL service robusto (para hoteles y lugares críticos)"""
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Usar circuit breaker para proteger API
+                result = await self.places_circuit_breaker.call(
+                    self.places_service.search_nearby_real, lat, lon, **kwargs
+                )
+                return result
+                
+            except CircuitBreakerOpenError:
+                self.logger.warning(f"⚡ Circuit breaker abierto para Google Places Real - usando fallback")
+                return self._synthetic_places_fallback(lat, lon, **kwargs)
+                
+            except QuotaExceededError:
+                self.logger.error("💰 Cuota Google Places Real excedida - usando fallback sintético")
+                return self._synthetic_places_fallback(lat, lon, **kwargs)
+                
+            except (asyncio.TimeoutError, ConnectionError) as e:
+                self.logger.warning(f"🌐 Places Real API timeout/conexión (intento {attempt + 1}): {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff_factor ** attempt)
+                    continue
+                return self._synthetic_places_fallback(lat, lon, **kwargs)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Places Real error crítico (intento {attempt + 1}): {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff_factor ** attempt)
+                    continue
+                return self._synthetic_places_fallback(lat, lon, **kwargs)
+        
+        # Si llegamos aquí, usar fallback de emergencia
+        return self._synthetic_places_fallback(lat, lon, **kwargs)
+    
+    def validate_coordinates(self, lat_or_places, lon=None):
+        """🧭 Validación robusta de coordenadas - soporte para coordenadas individuales o lista de places"""
+        # Si es una sola coordenada
+        if lon is not None:
+            return self._validate_single_coordinate(lat_or_places, lon)
+        
+        # Si es una lista de places
+        places = lat_or_places
+        validated = []
+        invalid_count = 0
+        
+        for i, place in enumerate(places):
+            try:
+                lat = float(place.get('lat', 0))
+                lon = float(place.get('lon', 0))
+                name = place.get('name', f'Lugar {i+1}')
+                
+                # Validar rangos válidos
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    self.logger.warning(f"🚫 Coordenadas inválidas: {name} ({lat}, {lon})")
+                    invalid_count += 1
+                    
+                    # Intentar corrección automática si está cerca de rango válido
+                    if self._attempt_coordinate_correction(lat, lon):
+                        corrected_lat, corrected_lon = self._attempt_coordinate_correction(lat, lon)
+                        place['lat'] = corrected_lat
+                        place['lon'] = corrected_lon
+                        place['coordinates_corrected'] = True
+                        self.logger.info(f"✅ Coordenadas corregidas: {name} -> ({corrected_lat}, {corrected_lon})")
+                        validated.append(place)
+                    continue
+                
+                # Detectar coordenadas (0,0) sospechosas
+                if abs(lat) < 0.001 and abs(lon) < 0.001:
+                    self.logger.warning(f"🤔 Coordenadas sospechosas (0,0): {name}")
+                    invalid_count += 1
+                    continue
+                    
+                # Detectar coordenadas que podrían estar intercambiadas
+                if abs(lat) > abs(lon) and abs(lon) > 90:
+                    self.logger.warning(f"🔄 Posibles coordenadas intercambiadas: {name} ({lat}, {lon})")
+                    # Intercambiar y validar
+                    if -90 <= lon <= 90 and -180 <= lat <= 180:
+                        place['lat'] = lon
+                        place['lon'] = lat
+                        place['coordinates_swapped'] = True
+                        self.logger.info(f"✅ Coordenadas intercambiadas: {name} -> ({lon}, {lat})")
+                        validated.append(place)
+                        continue
+                
+                # Coordenadas válidas
+                validated.append(place)
+                
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"❌ Error procesando coordenadas de {place.get('name', 'lugar desconocido')}: {e}")
+                invalid_count += 1
+                continue
+        
+        if invalid_count > 0:
+            self.logger.warning(f"⚠️ Se excluyeron {invalid_count} lugares con coordenadas inválidas")
+        
+        self.logger.info(f"✅ Validación completa: {len(validated)}/{len(places)} lugares válidos")
+        return validated
+    
+    def _validate_single_coordinate(self, lat: float, lon: float) -> Tuple[float, float]:
+        """🎯 Validar una sola coordenada"""
+        try:
+            lat = float(lat)
+            lon = float(lon)
+            
+            # Validar rangos válidos
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return (lat, lon)
+            else:
+                self.logger.warning(f"🚫 Coordenadas inválidas: ({lat}, {lon})")
+                # Intentar corrección automática
+                correction = self._attempt_coordinate_correction(lat, lon)
+                if correction:
+                    return correction
+                # Si no se puede corregir, usar coordenadas por defecto (Santiago, Chile)
+                return (-33.4489, -70.6693)
+                
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"❌ Error validando coordenadas ({lat}, {lon}): {e}")
+            return (-33.4489, -70.6693)  # Coordenadas por defecto
+    
+    def _attempt_coordinate_correction(self, lat: float, lon: float) -> Optional[Tuple[float, float]]:
+        """🔧 Intenta corregir coordenadas ligeramente fuera de rango"""
+        corrected_lat = lat
+        corrected_lon = lon
+        
+        # Corregir latitud
+        if lat > 90:
+            corrected_lat = 90
+        elif lat < -90:
+            corrected_lat = -90
+            
+        # Corregir longitud
+        if lon > 180:
+            corrected_lon = lon - 360 if lon <= 360 else 180
+        elif lon < -180:
+            corrected_lon = lon + 360 if lon >= -360 else -180
+        
+        # Solo devolver si la corrección es pequeña (< 5 grados)
+        if abs(lat - corrected_lat) <= 5 and abs(lon - corrected_lon) <= 5:
+            return corrected_lat, corrected_lon
+        
+        return None
+    
+    def _get_cache_key(self, lat1: float, lon1: float, lat2: float, lon2: float, mode: str) -> str:
+        """🗝️ Generar clave de cache para distancias (redondeada para mejor hit rate)"""
+        # Redondear coordenadas a 3 decimales (~100m precisión) para mejorar hit rate
+        lat1_r = round(lat1, 3)
+        lon1_r = round(lon1, 3)
+        lat2_r = round(lat2, 3)
+        lon2_r = round(lon2, 3)
+        
+        # Orden consistente para (A->B) = (B->A)
+        if (lat1_r, lon1_r) <= (lat2_r, lon2_r):
+            return f"{lat1_r},{lon1_r}-{lat2_r},{lon2_r}-{mode}"
+        else:
+            return f"{lat2_r},{lon2_r}-{lat1_r},{lon1_r}-{mode}"
+    
+    async def routing_service_cached(self, origin: Tuple[float, float], destination: Tuple[float, float], mode: str = 'walk'):
+        """🚀 Routing service con cache inteligente de distancias"""
+        cache_key = self._get_cache_key(origin[0], origin[1], destination[0], destination[1], mode)
+        
+        # Verificar cache
+        if cache_key in self.distance_cache:
+            self.cache_hits += 1
+            cached_result = self.distance_cache[cache_key].copy()
+            cached_result['cache_hit'] = True
+            self.logger.debug(f"⚡ Cache HIT: {cache_key} ({self.cache_hits} hits)")
+            return cached_result
+        
+        # Cache miss - llamar servicio robusto
+        self.cache_misses += 1
+        result = await self.routing_service_robust(origin, destination, mode)
+        
+        # Cachear resultado si es válido
+        if result and result.get('duration_minutes', 0) > 0:
+            self.distance_cache[cache_key] = result.copy()
+            
+            # Limitar tamaño del cache (mantener últimos 1000)
+            if len(self.distance_cache) > 1000:
+                # Remover las primeras 200 entradas (FIFO simple)
+                keys_to_remove = list(self.distance_cache.keys())[:200]
+                for key in keys_to_remove:
+                    del self.distance_cache[key]
+                self.logger.info(f"🧹 Cache limpiado: {len(keys_to_remove)} entradas removidas")
+        
+        result['cache_hit'] = False
+        self.logger.debug(f"📊 Cache MISS: {cache_key} ({self.cache_misses} misses)")
+        return result
+    
+    def get_cache_stats(self) -> Dict:
+        """📊 Estadísticas del cache de distancias"""
+        total_requests = self.cache_hits + self.cache_misses
+        hit_rate = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        return {
+            'cache_hits': self.cache_hits,
+            'cache_misses': self.cache_misses,
+            'hit_rate_percent': round(hit_rate, 2),
+            'cache_size': len(self.distance_cache),
+            'total_requests': total_requests,
+            'persistent_cache': hasattr(self, 'persistent_cache') and len(self.persistent_cache) > 0,
+            'batch_config': {
+                'batch_size': self.batch_size,
+                'max_concurrent': self.max_concurrent_requests,
+                'batch_delay_ms': int(self.batch_delay * 1000)
+            }
+        }
+    
+    # =========================================================================
+    # 🚀 BATCH PROCESSING & ASYNC OPTIMIZATION - SEMANA 2
+    # =========================================================================
+    
+    async def batch_places_search(self, locations: List[Tuple[float, float]], **common_kwargs):
+        """📦 Batch processing para múltiples búsquedas de Google Places"""
+        if not locations:
+            return []
+        
+        self.logger.info(f"📦 Iniciando batch search: {len(locations)} ubicaciones")
+        
+        # Dividir en batches
+        batches = [locations[i:i + self.batch_size] for i in range(0, len(locations), self.batch_size)]
+        all_results = []
+        
+        for batch_idx, batch in enumerate(batches):
+            self.logger.debug(f"🔄 Procesando batch {batch_idx + 1}/{len(batches)} ({len(batch)} ubicaciones)")
+            
+            # Crear semáforo para limitar concurrencia
+            semaphore = asyncio.Semaphore(min(self.max_concurrent_requests, len(batch)))
+            
+            # Crear tareas para el batch actual
+            batch_tasks = [
+                self._throttled_places_search(lat, lon, semaphore, **common_kwargs)
+                for lat, lon in batch
+            ]
+            
+            # Ejecutar batch en paralelo
+            try:
+                batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                
+                # Procesar resultados del batch
+                for i, result in enumerate(batch_results):
+                    if isinstance(result, Exception):
+                        self.logger.warning(f"⚠️ Error en ubicación {batch_idx * self.batch_size + i}: {result}")
+                        all_results.append([])  # Lista vacía para error
+                    else:
+                        all_results.append(result)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Error crítico en batch {batch_idx + 1}: {e}")
+                # Agregar listas vacías para todo el batch fallido
+                all_results.extend([[]] * len(batch))
+            
+            # Delay entre batches para respetar rate limits
+            if batch_idx < len(batches) - 1:  # No delay después del último batch
+                await asyncio.sleep(self.batch_delay)
+        
+        total_places = sum(len(results) for results in all_results)
+        self.logger.info(f"✅ Batch processing completado: {total_places} lugares encontrados total")
+        
+        return all_results
+    
+    async def _throttled_places_search(self, lat: float, lon: float, semaphore: asyncio.Semaphore, **kwargs):
+        """🎛️ Búsqueda throttled de Places con semáforo"""
+        async with semaphore:
+            try:
+                return await self.places_service_robust(lat, lon, **kwargs)
+            except Exception as e:
+                self.logger.warning(f"⚠️ Throttled search falló para ({lat:.3f}, {lon:.3f}): {e}")
+                return []
+    
+    async def parallel_routing_calculations(self, route_pairs: List[Tuple[Tuple[float, float], Tuple[float, float], str]]):
+        """🚗 Cálculos de routing en paralelo con throttling"""
+        if not route_pairs:
+            return []
+        
+        self.logger.info(f"🗺️ Calculando {len(route_pairs)} rutas en paralelo")
+        
+        # Crear semáforo para limitar concurrencia
+        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+        
+        # Crear tareas para todas las rutas
+        routing_tasks = [
+            self._throttled_routing_calculation(origin, destination, mode, semaphore)
+            for origin, destination, mode in route_pairs
+        ]
+        
+        # Ejecutar todas las tareas en paralelo
+        try:
+            results = await asyncio.gather(*routing_tasks, return_exceptions=True)
+            
+            # Procesar resultados
+            successful_results = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self.logger.warning(f"⚠️ Error en ruta {i}: {result}")
+                    # Usar fallback directo para rutas fallidas
+                    origin, destination, mode = route_pairs[i]
+                    fallback_result = self._emergency_routing_fallback(origin, destination, mode)
+                    successful_results.append(fallback_result)
+                else:
+                    successful_results.append(result)
+            
+            self.logger.info(f"✅ Routing paralelo completado: {len(successful_results)} rutas calculadas")
+            return successful_results
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error crítico en routing paralelo: {e}")
+            # Fallback completo - calcular todas las rutas con fallback
+            return [self._emergency_routing_fallback(origin, destination, mode) 
+                   for origin, destination, mode in route_pairs]
+    
+    async def _throttled_routing_calculation(self, origin: Tuple[float, float], destination: Tuple[float, float], 
+                                           mode: str, semaphore: asyncio.Semaphore):
+        """🎛️ Cálculo de ruta throttled con semáforo"""
+        async with semaphore:
+            return await self.routing_service_cached(origin, destination, mode)
+    
+    # =========================================================================
+    # 🎯 LAZY LOADING & SMART SUGGESTIONS - SEMANA 2
+    # =========================================================================
+    
+    async def generate_suggestions_lazy(self, day_number: int, location: Tuple[float, float], 
+                                      duration_minutes: int, **kwargs) -> Dict:
+        """🎯 Lazy loading de sugerencias - solo genera para días inmediatos"""
+        
+        # Configuración lazy loading
+        immediate_days_threshold = 3  # Solo generar para los primeros 3 días
+        
+        if day_number <= immediate_days_threshold:
+            # Generar sugerencias completas para días inmediatos
+            self.logger.info(f"🔄 Generando sugerencias completas para día {day_number}")
+            
+            try:
+                suggestions = await self.places_service_robust(
+                    lat=location[0],
+                    lon=location[1],
+                    types=['tourist_attraction', 'restaurant', 'point_of_interest'],
+                    radius_m=5000,
+                    limit=5,
+                    **kwargs
+                )
+                
+                return {
+                    "immediate_suggestions": suggestions[:3],  # Top 3 sugerencias inmediatas
+                    "lazy_placeholders": {},  # No hay placeholders para días inmediatos
+                    "suggestions": suggestions[:3],  # Mantener compatibilidad
+                    "lazy_loaded": False,
+                    "generation_time": duration_minutes // 60,  # Estimación en horas
+                    "note": f"Sugerencias para {duration_minutes // 60}h de tiempo libre ({len(suggestions)} lugares reales encontrados)"
+                }
+                
+            except Exception as e:
+                self.logger.warning(f"⚠️ Error generando sugerencias para día {day_number}: {e}")
+                return self._generate_placeholder_suggestions(day_number, location, duration_minutes)
+        
+        else:
+            # Placeholder para días lejanos - se cargarán bajo demanda
+            self.logger.info(f"📋 Generando placeholder para día {day_number} (lazy loading)")
+            placeholder_id = f"day_{day_number}_placeholder"
+            
+            # Registrar placeholder en el sistema
+            self.lazy_placeholders[placeholder_id] = {
+                "day_number": day_number,
+                "location": location,
+                "duration_minutes": duration_minutes,
+                "status": "pending",
+                "created_at": datetime.now().isoformat()
+            }
+            
+            return {
+                "immediate_suggestions": [],  # No hay sugerencias inmediatas para días lejanos
+                "lazy_placeholders": {placeholder_id: self.lazy_placeholders[placeholder_id]},
+                "suggestions": [],  # Mantener compatibilidad
+                "lazy_loaded": True,
+                "load_endpoint": f"/api/suggestions/day/{day_number}",
+                "location": location,
+                "duration_minutes": duration_minutes,
+                "note": f"Sugerencias para {duration_minutes // 60}h se cargarán cuando sea necesario",
+                "load_instruction": "Las sugerencias se generarán automáticamente 24h antes de la fecha"
+            }
+    
+    def _generate_placeholder_suggestions(self, day_number: int, location: Tuple[float, float], 
+                                        duration_minutes: int) -> Dict:
+        """📋 Generar sugerencias placeholder básicas"""
+        basic_suggestions = [
+            {
+                "name": "Explorar la zona local",
+                "lat": location[0] + 0.001,
+                "lon": location[1] + 0.001,
+                "type": "point_of_interest",
+                "rating": 4.0,
+                "placeholder": True
+            },
+            {
+                "name": "Encontrar restaurante cercano",
+                "lat": location[0] - 0.001,
+                "lon": location[1] - 0.001,
+                "type": "restaurant",
+                "rating": 4.0,
+                "placeholder": True
+            }
+        ]
+        
+        return {
+            "suggestions": basic_suggestions,
+            "lazy_loaded": False,
+            "placeholder_generated": True,
+            "note": f"Sugerencias básicas para {duration_minutes // 60}h de tiempo libre"
+        }
+    
+    async def load_lazy_suggestions(self, placeholder_id: str) -> Dict:
+        """🔄 Cargar sugerencias lazy bajo demanda usando placeholder_id"""
+        self.logger.info(f"🎯 Cargando sugerencias lazy para placeholder: {placeholder_id}")
+        
+        # Verificar si el placeholder existe
+        if placeholder_id not in self.lazy_placeholders:
+            self.logger.warning(f"⚠️ Placeholder {placeholder_id} no encontrado")
+            return None
+        
+        placeholder_data = self.lazy_placeholders[placeholder_id]
+        day_number = placeholder_data["day_number"]
+        location = placeholder_data["location"]
+        duration_minutes = placeholder_data["duration_minutes"]
+        
+        try:
+            # Generar sugerencias completas ahora que se necesitan
+            suggestions = await self.places_service_robust(
+                lat=location[0],
+                lon=location[1],
+                types=['tourist_attraction', 'restaurant', 'museum', 'park'],
+                radius_m=10000,  # Radio más amplio para días lejanos
+                limit=8
+            )
+            
+            # Actualizar estado del placeholder
+            self.lazy_placeholders[placeholder_id]["status"] = "loaded"
+            self.lazy_placeholders[placeholder_id]["loaded_at"] = datetime.now().isoformat()
+            
+            return {
+                "suggestions": suggestions,
+                "lazy_loaded": True,
+                "loaded_on_demand": True,
+                "day_number": day_number,
+                "placeholder_id": placeholder_id,
+                "note": f"Sugerencias cargadas bajo demanda para {duration_minutes // 60}h ({len(suggestions)} lugares encontrados)"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error cargando sugerencias lazy: {e}")
+            return self._generate_placeholder_suggestions(day_number, location, duration_minutes)
+    
+    # =========================================================================
+    # 💾 PERSISTENT CACHE SYSTEM - SEMANA 2
+    # =========================================================================
+    
+    def _get_cache_filename(self) -> str:
+        """📁 Obtener nombre del archivo de cache"""
+        return "goveling_distance_cache.json"
+    
+    def load_persistent_cache(self):
+        """💾 Cargar cache persistente desde disco"""
+        cache_file = self._get_cache_filename()
+        try:
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cached_data = json.load(f)
+                    self.distance_cache = cached_data.get('distances', {})
+                    
+                    # Cargar estadísticas si existen
+                    stats = cached_data.get('stats', {})
+                    self.cache_hits = stats.get('cache_hits', 0)
+                    self.cache_misses = stats.get('cache_misses', 0)
+                    
+                    self.logger.info(f"💾 Cache persistente cargado: {len(self.distance_cache)} entradas")
+                    return True
+            else:
+                self.logger.info("📄 No existe cache persistente, empezando desde cero")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error cargando cache persistente: {e}")
+            return False
+    
+    def _get_cache_filename(self):
+        """📂 Obtener nombre de archivo de cache"""
+        return "/Users/sebastianconcha/Developer/goveling/goveling ML/cache_persistent.json"
+    
+    def save_persistent_cache(self):
+        """💾 Guardar cache persistente a disco"""
+        cache_file = self._get_cache_filename()
+        try:
+            cache_data = {
+                'distances': self.distance_cache,
+                'stats': {
+                    'cache_hits': self.cache_hits,
+                    'cache_misses': self.cache_misses,
+                    'last_updated': time.time()
+                },
+                'metadata': {
+                    'version': '3.1',
+                    'total_entries': len(self.distance_cache)
+                }
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+                
+            self.logger.info(f"💾 Cache persistente guardado: {len(self.distance_cache)} entradas")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error guardando cache persistente: {e}")
+            return False
+    
+    def cleanup_old_cache_entries(self, max_age_days: int = 30):
+        """🧹 Limpiar entradas antiguas del cache"""
+        if not self.distance_cache:
+            return 0
+        
+        current_time = time.time()
+        max_age_seconds = max_age_days * 24 * 3600
+        removed_count = 0
+        
+        # Crear nueva copia del cache sin entradas antiguas
+        new_cache = {}
+        for key, value in self.distance_cache.items():
+            try:
+                # Si el valor tiene timestamp y es muy antiguo, no incluirlo
+                entry_timestamp = value.get('timestamp', current_time)
+                
+                # Convertir timestamp a float si es string ISO
+                if isinstance(entry_timestamp, str):
+                    from datetime import datetime
+                    entry_time = datetime.fromisoformat(entry_timestamp.replace('Z', '+00:00')).timestamp()
+                else:
+                    entry_time = entry_timestamp
+                
+                if current_time - entry_time <= max_age_seconds:
+                    new_cache[key] = value
+                else:
+                    removed_count += 1
+                    
+            except Exception as e:
+                # Si hay error parseando timestamp, mantener la entrada
+                self.logger.warning(f"⚠️ Error parseando timestamp para {key}: {e}")
+                new_cache[key] = value
+        
+        self.distance_cache = new_cache
+        
+        if removed_count > 0:
+            self.logger.info(f"🧹 Cache cleanup: {removed_count} entradas antiguas removidas")
+            
+        return removed_count
+    
+    async def routing_service_persistent_cached(self, origin: Tuple[float, float], destination: Tuple[float, float], mode: str = 'walk'):
+        """🚀 Routing service con cache persistente"""
+        cache_key = self._get_cache_key(origin[0], origin[1], destination[0], destination[1], mode)
+        
+        # Verificar cache
+        if cache_key in self.distance_cache:
+            self.cache_hits += 1
+            cached_result = self.distance_cache[cache_key].copy()
+            cached_result['cache_hit'] = True
+            cached_result['persistent_cache'] = True
+            self.logger.debug(f"💾 Persistent cache HIT: {cache_key}")
+            return cached_result
+        
+        # Cache miss - llamar servicio robusto
+        self.cache_misses += 1
+        result = await self.routing_service_robust(origin, destination, mode)
+        
+        # Cachear resultado con timestamp
+        if result and result.get('duration_minutes', 0) > 0:
+            result['timestamp'] = time.time()
+            self.distance_cache[cache_key] = result.copy()
+            
+            # Auto-save cada 50 nuevas entradas
+            if self.cache_misses % 50 == 0:
+                self.save_persistent_cache()
+        
+        result['cache_hit'] = False
+        result['persistent_cache'] = True
+        return result
+    
+    def finalize_optimization(self):
+        """🎯 Finalizar optimización - guardar cache y limpiar recursos"""
+        try:
+            # Guardar cache persistente
+            self.save_persistent_cache()
+            
+            # Cleanup de entradas antiguas
+            removed = self.cleanup_old_cache_entries(max_age_days=30)
+            
+            # Log de estadísticas finales
+            stats = self.get_cache_stats()
+            self.logger.info(f"🎯 Optimización finalizada:")
+            self.logger.info(f"  💾 Cache guardado: {stats['cache_size']} entradas")
+            self.logger.info(f"  ⚡ Hit rate final: {stats['hit_rate_percent']}%")
+            if removed > 0:
+                self.logger.info(f"  🧹 Limpieza: {removed} entradas antiguas removidas")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error en finalización: {e}")
+        
     # =========================================================================
     # 1. CLUSTERING POIs (UNCHANGED FROM V3.0)
     # =========================================================================
@@ -146,6 +1022,11 @@ class HybridOptimizerV31:
         
         self.logger.info(f"✅ {len(cluster_objects)} clusters creados")
         return cluster_objects
+    
+    def create_clusters(self, places: List[Dict], hotel: Optional[Dict] = None) -> List[Cluster]:
+        """🎯 Alias para cluster_pois - compatibilidad con tests y análisis"""
+        self.logger.info(f"🎯 create_clusters llamado con {len(places)} lugares")
+        return self.cluster_pois(places)
     
     def _choose_eps_km(self, coordinates: np.ndarray) -> float:
         """Elegir eps dinámicamente"""
@@ -334,19 +1215,19 @@ class HybridOptimizerV31:
             place_types_to_search = ['tourist_attraction', 'restaurant', 'museum', 'park']
             
             for place_type in place_types_to_search:
-                try:
-                    # Usar Google Places para encontrar atracciones locales
-                    local_places = await self.places_service.search_nearby(
-                        lat=search_location[0],
-                        lon=search_location[1],
-                        types=[place_type],
-                        radius_m=10000,  # 10km de radio para clusters remotos
-                        limit=3
-                    )
-                    
-                    self.logger.info(f"🔍 Tipo: {place_type} - Encontrados: {len(local_places)} lugares")
-                    
-                    for place in local_places[:2]:  # Solo top 2 por tipo
+                # Usar Google Places robusto para encontrar atracciones locales
+                local_places = await self.places_service_robust(
+                    lat=search_location[0],
+                    lon=search_location[1],
+                    types=[place_type],
+                    radius_m=10000,  # 10km de radio para clusters remotos
+                    limit=3
+                )
+                
+                # El servicio robusto siempre devuelve una lista (puede estar vacía o con fallbacks)
+                self.logger.info(f"🔍 Tipo: {place_type} - Encontrados: {len(local_places)} lugares")
+                
+                for place in local_places[:2]:  # Solo top 2 por tipo
                         # Evitar duplicar lugares que ya están en el cluster
                         place_name = place.get('name', '')
                         if not any(existing['name'] == place_name for existing in cluster.places):
@@ -363,10 +1244,6 @@ class HybridOptimizerV31:
                             self.logger.info(f"  ➕ Agregado: {place_name} (⭐{place.get('rating', 4.0)})")
                         else:
                             self.logger.info(f"  ⏭️ Duplicado: {place_name} - ya está en cluster")
-                            
-                except Exception as e:
-                    self.logger.warning(f"⚠️ Error buscando {place_type}: {e}")
-                    continue
             
             # Agregar sugerencias al cluster
             if additional_suggestions:
@@ -421,8 +1298,8 @@ class HybridOptimizerV31:
             search_location = cluster.centroid
             self.logger.info(f"🏨 Buscando hoteles reales cerca de {search_location}")
             
-            # Buscar hoteles usando Google Places API REAL (no sintético)
-            hotels = await self.places_service.search_nearby_real(
+            # Buscar hoteles usando Google Places API REAL robusto
+            hotels = await self.places_service_real_robust(
                 lat=search_location[0],
                 lon=search_location[1],
                 radius_m=15000,  # 15km de radio para áreas remotas
@@ -1166,29 +2043,13 @@ class HybridOptimizerV31:
         Genera intercity_transfer cuando distancia > 30km con ETA por velocidad promedio
         """
         
-        # 🗺️ Intentar routing service gratuito
-        try:
-            eta_info = await self.routing_service.eta_between(origin, destination, transport_mode)
-        except Exception as e:
-            self.logger.warning(f"⚠️ Routing service falló: {e} - usando fallback ETA")
-            # 📊 Fallback ETA con velocidad promedio
-            from utils.geo_utils import haversine_km
-            distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
-            
-            # Auto-selección de modo para distancias > 30km
-            if distance_km > 30.0 and transport_mode in ["walk", "walking"]:
-                transport_mode = "drive"
-                self.logger.info(f"🚗 Distancia {distance_km:.1f}km > 30km: forzando mode=drive en fallback")
-            
-            speed_kmh = settings.DRIVE_KMH if transport_mode == "drive" else settings.WALK_KMH
-            duration_minutes = (distance_km / speed_kmh) * 60 * 1.3  # 30% buffer
-            
-            eta_info = {
-                'distance_km': distance_km,
-                'duration_minutes': duration_minutes,
-                'status': 'FALLBACK_ETA',
-                'google_enhanced': False
-            }
+        # 🗺️ Usar routing service con cache
+        eta_info = await self.routing_service_cached(origin, destination, transport_mode)
+        
+        # Auto-selección de modo para distancias largas si es necesario
+        if eta_info.get('distance_km', 0) > 30.0 and transport_mode in ["walk", "walking"]:
+            self.logger.info(f"🚗 Distancia {eta_info['distance_km']:.1f}km > 30km: recalculando con drive")
+            eta_info = await self.routing_service_robust(origin, destination, "drive")
         
         # Determinar nombres reales (sin fallar) - MEJORADO
         try:
@@ -1292,41 +2153,24 @@ class HybridOptimizerV31:
                 
                 # Intentar ETA con routing service gratuito
                 transfer_mode = "drive"
-                try:
-                    eta_info = await self.routing_service.eta_between(
-                        (curr_base['lat'], curr_base['lon']),
-                        (next_base['lat'], next_base['lon']),
-                        transfer_mode
-                    )
+                # Usar routing service robusto
+                eta_info = await self.routing_service_robust(
+                    (curr_base['lat'], curr_base['lon']),
+                    (next_base['lat'], next_base['lon']),
+                    transfer_mode
+                )
                     
-                    # Si Google falla o es cruce oceánico muy largo, usar heurística de vuelo
-                    if (eta_info.get('status') in ['ZERO_RESULTS', 'FALLBACK_ETA'] and distance_km > 1000) or distance_km > settings.FLIGHT_THRESHOLD_KM:
-                        transfer_mode = "flight"
-                        eta_min = int((distance_km / settings.AIR_SPEED_KMPH) * 60 + settings.AIR_BUFFERS_MIN)
-                        eta_info = {
-                            'distance_km': distance_km,
-                            'duration_minutes': eta_min,
-                            'status': 'FLIGHT_HEURISTIC',
-                            'google_enhanced': False
-                        }
-                        self.logger.info(f"✈️ Modo vuelo aplicado: {distance_km:.1f}km → {eta_min}min")
-                    
-                except Exception as e:
-                    # Fallback completo - usar vuelo para distancias largas
-                    self.logger.warning(f"⚠️ Google Directions falló: {e}")
-                    if distance_km > 500:
-                        transfer_mode = "flight"
-                        eta_min = int((distance_km / settings.AIR_SPEED_KMPH) * 60 + settings.AIR_BUFFERS_MIN)
-                    else:
-                        transfer_mode = "drive"
-                        eta_min = int((distance_km / settings.DRIVE_KMH) * 60 * 1.3)  # 30% buffer
-                    
+                # Si routing falló o es cruce oceánico muy largo, usar heurística de vuelo
+                if (eta_info.get('fallback_used') and distance_km > 1000) or distance_km > settings.FLIGHT_THRESHOLD_KM:
+                    transfer_mode = "flight"
+                    eta_min = int((distance_km / settings.AIR_SPEED_KMPH) * 60 + settings.AIR_BUFFERS_MIN)
                     eta_info = {
                         'distance_km': distance_km,
                         'duration_minutes': eta_min,
-                        'status': 'FALLBACK_HEURISTIC',
+                        'status': 'FLIGHT_HEURISTIC',
                         'google_enhanced': False
                     }
+                    self.logger.info(f"✈️ Modo vuelo aplicado: {distance_km:.1f}km → {eta_min}min")
                 
                 # Crear transfer intercity
                 intercity_transfer = {
@@ -2157,7 +3001,8 @@ class HybridOptimizerV31:
                             home_base=cluster.home_base
                         )
                         
-                        # Distribución más inteligente                        day_idx = i % len(day_keys)
+                        # Distribución más inteligente
+                        day_idx = i % len(day_keys)
                         day_assignments[day_keys[day_idx]].append(mini_cluster)
                         
                 else:
@@ -2462,6 +3307,18 @@ async def optimize_itinerary_hybrid_v31(
     logging.info(f"📍 {len(places)} lugares, {(end_date - start_date).days + 1} días")
     logging.info(f"📦 Estrategia: {packing_strategy}")
     
+    # 🛡️ VALIDACIÓN ROBUSTA DE COORDENADAS
+    logging.info("🧭 Validando coordenadas de entrada...")
+    places = optimizer.validate_coordinates(places)
+    
+    if not places:
+        logging.error("❌ No hay lugares válidos después de la validación")
+        return await optimizer._generate_free_days_with_suggestions(
+            start_date, end_date, daily_start_hour, daily_end_hour
+        )
+    
+    logging.info(f"✅ Validación completa: {len(places)} lugares válidos procesados")
+    
     # 1. Clustering POIs
     clusters = optimizer.cluster_pois(places)
     if not clusters:
@@ -2565,10 +3422,15 @@ async def optimize_itinerary_hybrid_v31(
     # 6. Enhanced metrics
     optimization_metrics = optimizer.calculate_enhanced_metrics(days)
     
+    # 🚀 Agregar estadísticas de performance
+    cache_stats = optimizer.get_cache_stats()
+    optimization_metrics['cache_performance'] = cache_stats
+    
     logging.info(f"✅ Optimización V3.1 completada:")
     logging.info(f"  📊 {sum(len(d['activities']) for d in days)} actividades programadas")
     logging.info(f"  🎯 Score: {optimization_metrics['efficiency_score']:.1%}")
     logging.info(f"  🚗 {optimization_metrics['long_transfers_detected']} traslados intercity")
+    logging.info(f"  ⚡ Cache: {cache_stats['hit_rate_percent']:.1f}% hit rate ({cache_stats['cache_hits']} hits)")
     
     return {
         "days": days,

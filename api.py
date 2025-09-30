@@ -92,6 +92,7 @@ async def debug_suggestions(lat: float = -23.6521, lon: float = -70.3958, day: i
             "error_type": str(e.__class__.__name__)
         }
 
+@app.post("/create_itinerary", response_model=ItineraryResponse, tags=["Core"])
 @app.post("/api/v2/itinerary/generate-hybrid", response_model=ItineraryResponse, tags=["Hybrid Optimizer"])
 @cache_result(expiry_minutes=5)  # 5 minutos de caché
 async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
@@ -1264,6 +1265,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             detail=f"Error generating hybrid itinerary: {str(e)}"
         )
 
+@app.post("/recommend_hotels")
 @app.post("/api/v2/hotels/recommend")
 async def recommend_hotels_endpoint(request: HotelRecommendationRequest):
     """

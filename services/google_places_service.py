@@ -14,14 +14,22 @@ class GooglePlacesService:
         self, 
         lat: float, 
         lon: float, 
-        types: List[str], 
+        types: Optional[List[str]] = None, 
         radius_m: int = 3000, 
-        limit: int = 3  # Cambiado de 6 a 3
+        limit: int = 3,  # Cambiado de 6 a 3
+        **kwargs  # Para compatibilidad con parámetros adicionales como 'preferences'
     ) -> List[Dict]:
         """
         🔍 Búsqueda robusta de lugares cercanos con manejo de errores
         """
         try:
+            # Usar tipos por defecto si no se proporcionan
+            if types is None:
+                types = ['tourist_attraction', 'restaurant', 'point_of_interest']
+            
+            # Filtrar kwargs no reconocidos
+            _ = kwargs.pop('preferences', None)  # Ignorar preferences si existe
+            
             # Implementar búsqueda con retry
             for attempt in range(2):  # 2 intentos
                 try:
@@ -228,18 +236,22 @@ class GooglePlacesService:
         lat: float,
         lon: float,
         radius: int,
-        type: str,
+        types: Optional[List[str]] = None,
+        type: Optional[str] = None,  # Mantener compatibilidad con versión anterior
         limit: int = 10
     ) -> Optional[Dict[str, Any]]:
         """Llamada real a Google Places Nearby Search API"""
         try:
             import aiohttp
             
+            # Determinar el tipo a usar
+            search_type = type if type else (types[0] if types and len(types) > 0 else 'tourist_attraction')
+            
             url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
             params = {
                 'location': f"{lat},{lon}",
                 'radius': radius,
-                'type': type,
+                'type': search_type,
                 'key': self.api_key,
                 'language': 'es'
             }
@@ -249,10 +261,10 @@ class GooglePlacesService:
                     if response.status == 200:
                         data = await response.json()
                         if data.get('status') == 'OK':
-                            self.logger.info(f"✅ Google Places: {len(data.get('results', []))} lugares encontrados para {type}")
+                            self.logger.info(f"✅ Google Places: {len(data.get('results', []))} lugares encontrados para {search_type}")
                             return data
                         else:
-                            self.logger.warning(f"Google Places status: {data.get('status')} para {type}")
+                            self.logger.warning(f"Google Places status: {data.get('status')} para {search_type}")
                             return None
                     else:
                         self.logger.warning(f"Google Places HTTP error: {response.status}")
