@@ -972,16 +972,39 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 'prev_day_activities': prev_day_activities
             }
             
-            # Convertir actividades del nuevo formato
+            # Separar places y transfers
             frontend_places = []
+            day_transfers = []
             activities = day.get("activities", [])
-            for idx, activity in enumerate(activities, 1):
-                frontend_place = format_activity_for_frontend(activity, idx, activities, idx-1)
-                if frontend_place is not None:  # Filtrar intercity activities que retornan None
-                    frontend_places.append(frontend_place)
+            place_order = 1
+            transfer_order = 1
             
-            # Guardar actividades de este día para el siguiente
-            prev_day_activities = frontend_places.copy()
+            for idx, activity in enumerate(activities):
+                # Detectar si es un transfer
+                is_transfer = (get_value(activity, 'category', '') == 'transfer' or 
+                              get_value(activity, 'type', '') == 'transfer' or
+                              'traslado' in str(get_value(activity, 'name', '')).lower() or
+                              'viaje' in str(get_value(activity, 'name', '')).lower() or
+                              'regreso' in str(get_value(activity, 'name', '')).lower())
+                
+                if is_transfer:
+                    # Agregar a transfers del día
+                    transfer_data = format_activity_for_frontend(activity, transfer_order, activities, idx)
+                    if transfer_data is not None:
+                        # Cambiar el campo 'order' por 'transfer_order' para claridad
+                        transfer_data['transfer_order'] = transfer_order
+                        del transfer_data['order']  # Remover el campo 'order' original
+                        day_transfers.append(transfer_data)
+                        transfer_order += 1
+                else:
+                    # Agregar a places del día
+                    place_data = format_activity_for_frontend(activity, place_order, activities, idx)
+                    if place_data is not None:
+                        frontend_places.append(place_data)
+                        place_order += 1
+            
+            # Guardar actividades de este día para el siguiente (incluir ambos types)
+            prev_day_activities = frontend_places + day_transfers
             
             # Calcular tiempos del día correctamente desde frontend_places
             total_activity_time_min = 0
@@ -1027,6 +1050,9 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 "day": day_counter,
                 "date": day.get("date", ""),
                 "places": frontend_places,
+                "transfers": day_transfers,
+                "total_places": len(frontend_places),
+                "total_transfers": len(day_transfers),
                 "total_time": f"{total_time_hours:.1f}h",
                 "walking_time": walking_time,
                 "transport_time": transport_time,  # Ahora separado correctamente
@@ -1035,9 +1061,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 "is_tentative": False
             }
             
-            # Añadir transfers y base si existen (campos opcionales para V3.1)
-            if day.get("transfers"):
-                day_data["transfers"] = day["transfers"]
+            # Base si existe (campo opcional para V3.1)
             if day.get("base"):
                 day_data["base"] = day["base"]
             if day.get("free_blocks"):

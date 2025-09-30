@@ -1,0 +1,23 @@
+{
+  "distances": {
+    "test_route_1": {
+      "distance": 1500,
+      "duration": 300,
+      "timestamp": "2025-09-30T12:56:33.413226"
+    },
+    "test_route_2": {
+      "distance": 2000,
+      "duration": 450,
+      "timestamp": "2025-09-30T12:56:33.413228"
+    }
+  },
+  "stats": {
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "last_updated": 1759247793.413911
+  },
+  "metadata": {
+    "version": "3.1",
+    "total_entries": 2
+  }
+}
