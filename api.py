@@ -16,13 +16,9 @@ from services.google_places_service import GooglePlacesService
 from utils.logging_config import setup_production_logging
 from utils.performance_cache import cache_result, hash_places
 from utils.hybrid_optimizer_v31 import HybridOptimizerV31
-from utils.common_routes_cache import CommonRoutesCache
 
 # Configurar logging optimizado
 logger = setup_production_logging()
-
-# 🚀 Inicializar cache de rutas comunes globalmente para máxima eficiencia
-routes_cache = CommonRoutesCache()
 
 app = FastAPI(
     title="Goveling ML API",
@@ -49,120 +45,6 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "version": "2.2.0"
     }
-
-@app.get("/cache/routes/stats")
-async def cache_routes_stats():
-    """🚀 Estadísticas del cache de rutas comunes"""
-    try:
-        stats = routes_cache.get_cache_stats()
-        return {
-            "status": "success",
-            "cache_stats": stats,
-            "sample_routes": [
-                "santiago_valparaiso (120km, 90min car)",
-                "santiago_atacama (1600km, 16h car)", 
-                "santiago_concepcion (515km, 5.5h car)",
-                "valparaiso_serena (350km, 4h car)"
-            ],
-            "performance_boost": "Hasta 60% más rápido para rutas conocidas"
-        }
-    except Exception as e:
-        logger.error(f"❌ Error obteniendo stats de cache: {e}")
-        return {"status": "error", "detail": str(e)}
-
-@app.get("/cache/routes/benchmark")
-async def cache_routes_benchmark():
-    """⚡ Benchmark de performance: Cache vs API calls"""
-    import time
-    from utils.free_routing_service import FreeRoutingService
-    
-    try:
-        routing_service = FreeRoutingService()
-        
-        # Rutas de test (conocidas vs desconocidas)
-        test_routes = [
-            {
-                "name": "Santiago → Valparaíso",
-                "origin": (-33.4489, -70.6693),
-                "destination": (-33.0472, -71.6127),
-                "expected_cache": True
-            },
-            {
-                "name": "Santiago → Atacama", 
-                "origin": (-33.4489, -70.6693),
-                "destination": (-22.4594, -68.9139),
-                "expected_cache": True
-            },
-            {
-                "name": "Ubicación Random",
-                "origin": (-35.1234, -71.5678),
-                "destination": (-36.9876, -72.1234), 
-                "expected_cache": False
-            }
-        ]
-        
-        results = []
-        
-        for route in test_routes:
-            # Medir tiempo de respuesta
-            start_time = time.time()
-            
-            result = await routing_service.eta_between(
-                route["origin"], 
-                route["destination"], 
-                'car'
-            )
-            
-            end_time = time.time()
-            response_time_ms = (end_time - start_time) * 1000
-            
-            is_cached = result.get('cached', False)
-            
-            results.append({
-                "route": route["name"],
-                "response_time_ms": round(response_time_ms, 2),
-                "cached": is_cached,
-                "expected_cache": route["expected_cache"],
-                "cache_match": is_cached == route["expected_cache"],
-                "distance_km": result.get('distance_km', 0),
-                "duration_minutes": result.get('duration_minutes', 0),
-                "source": result.get('source', 'unknown')
-            })
-        
-        # Calcular estadísticas
-        cached_times = [r["response_time_ms"] for r in results if r["cached"]]
-        non_cached_times = [r["response_time_ms"] for r in results if not r["cached"]]
-        
-        avg_cached = sum(cached_times) / len(cached_times) if cached_times else 0
-        avg_non_cached = sum(non_cached_times) / len(non_cached_times) if non_cached_times else 0
-        
-        performance_improvement = 0
-        if avg_non_cached > 0:
-            performance_improvement = ((avg_non_cached - avg_cached) / avg_non_cached) * 100
-        
-        return {
-            "status": "success",
-            "benchmark_results": results,
-            "performance_stats": {
-                "avg_cached_response_ms": round(avg_cached, 2),
-                "avg_non_cached_response_ms": round(avg_non_cached, 2),
-                "performance_improvement_percent": round(performance_improvement, 1),
-                "cache_hit_rate": len(cached_times) / len(results) * 100
-            },
-            "recommendations": [
-                "✅ Cache funciona correctamente" if performance_improvement > 0 else "⚠️ Verificar cache",
-                f"🚀 Mejora de velocidad: {performance_improvement:.1f}%" if performance_improvement > 0 else "No improvement detected"
-            ]
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error en benchmark: {e}")
-        import traceback
-        return {
-            "status": "error", 
-            "detail": str(e),
-            "traceback": traceback.format_exc()
-        }
 
 @app.get("/debug/suggestions")
 async def debug_suggestions(lat: float = -23.6521, lon: float = -70.3958, day: int = 1):
@@ -783,22 +665,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                         logger.debug(f"🔧 Calculando distancia para transfer '{activity_name}': {distance_km:.2f}km")
                 
                 if distance_km > 0:
-                    # 🚀 CACHE CHECK: Verificar rutas comunes pre-calculadas
-                    origin_lat = get_value(activity, 'origin_lat')
-                    origin_lon = get_value(activity, 'origin_lon')
-                    dest_lat = get_value(activity, 'lat')
-                    dest_lon = get_value(activity, 'lon')
-                    
-                    if all([origin_lat, origin_lon, dest_lat, dest_lon]):
-                        cached_route = routes_cache.find_cached_route(
-                            origin_lat, origin_lon, dest_lat, dest_lon, transport_mode
-                        )
-                        if cached_route:
-                            cached_time = cached_route['duration_minutes']
-                            logger.info(f"🚀 Cache HIT transfer: '{activity_name}' = {cached_time}min (ruta: {cached_route['route_name']})")
-                            return cached_time
-                    
-                    # Velocidades realistas por modo (fallback si no hay cache)
+                    # Velocidades realistas por modo
                     speeds = {
                         'walk': 4.5,      # 4.5 km/h caminando
                         'walking': 4.5,

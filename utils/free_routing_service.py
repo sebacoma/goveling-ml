@@ -8,14 +8,12 @@ import logging
 from typing import Dict, Tuple, Optional
 from utils.osrm_service import OSRMService
 from utils.openroute_service import OpenRouteService
-from utils.common_routes_cache import CommonRoutesCache
 from utils.geo_utils import haversine_km
 
 class FreeRoutingService:
     def __init__(self):
         self.osrm = OSRMService()
         self.openroute = OpenRouteService()
-        self.routes_cache = CommonRoutesCache()
         self.logger = logging.getLogger(__name__)
         
     async def eta_between(
@@ -26,21 +24,8 @@ class FreeRoutingService:
     ) -> Dict:
         """
         🎯 ETA inteligente con múltiples fuentes gratuitas
-        Prioridad: Cache → OSRM → OpenRoute → Fallback inteligente
+        Prioridad: OSRM → OpenRoute → Fallback inteligente
         """
-        
-        # 🚀 PASO 1: Verificar cache de rutas comunes (MÁXIMA VELOCIDAD)
-        cached_result = self.routes_cache.find_cached_route(
-            origin[0], origin[1], destination[0], destination[1], transport_mode
-        )
-        if cached_result:
-            return {
-                'distance_km': cached_result['distance_km'],
-                'duration_minutes': cached_result['duration_minutes'],
-                'source': f"cache_{cached_result['route_name']}",
-                'transport_mode': transport_mode,
-                'cached': True
-            }
         
         # Para distancias muy cortas, usar cálculo directo
         distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
