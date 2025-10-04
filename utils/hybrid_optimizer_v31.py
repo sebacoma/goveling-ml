@@ -1110,16 +1110,8 @@ class HybridOptimizerV31:
         # 2. Asignar accommodations del usuario a clusters sin base
         if accommodations:
             clusters_without_base = [c for c in clusters if not c.home_base]
-            self.logger.info(f"🏨 DEBUG: {len(clusters_without_base)} clusters sin base necesitan accommodations del usuario")
-            self.logger.info(f"🏨 DEBUG: Accommodations disponibles: {len(accommodations)}")
-            
+            self.logger.info(f"🏨 Asignando accommodations del usuario a {len(clusters_without_base)} clusters")
             self._assign_user_hotels_to_clusters(clusters_without_base, accommodations)
-            
-            # Verificar resultados después de asignación
-            assigned_count = sum(1 for c in clusters if c.home_base and getattr(c, 'home_base_source', '') == 'user_provided')
-            self.logger.info(f"🏨 DEBUG: {assigned_count} clusters asignados con accommodations del usuario")
-        else:
-            self.logger.info("🏨 DEBUG: No hay accommodations del usuario para asignar")
         
         # 3. Recomendar hoteles para clusters que aún no tienen base
         clusters_without_base = [c for c in clusters if not c.home_base]
@@ -1135,21 +1127,15 @@ class HybridOptimizerV31:
     
     def _assign_user_hotels_to_clusters(self, clusters: List[Cluster], accommodations: List[Dict]) -> List[Cluster]:
         """Asignar hoteles del usuario"""
-        self.logger.info(f"🔍 DEBUG: _assign_user_hotels_to_clusters llamada con {len(accommodations)} accommodations")
-        
         for cluster in clusters:
             min_distance = float('inf')
             closest_hotel = None
-            
-            self.logger.info(f"🔍 DEBUG: Procesando cluster {cluster.label} en {cluster.centroid}")
             
             for hotel in accommodations:
                 distance = haversine_km(
                     cluster.centroid[0], cluster.centroid[1],
                     hotel['lat'], hotel['lon']
                 )
-                self.logger.info(f"🔍 DEBUG: Hotel {hotel.get('name', 'Sin nombre')} a {distance:.2f}km del cluster")
-                
                 if distance < min_distance:
                     min_distance = distance
                     closest_hotel = hotel
@@ -1157,9 +1143,7 @@ class HybridOptimizerV31:
             if closest_hotel:
                 cluster.home_base = closest_hotel.copy()
                 cluster.home_base_source = "user_provided"
-                self.logger.info(f"✅ Cluster {cluster.label}: {closest_hotel['name']} asignado (usuario, {min_distance:.2f}km)")
-            else:
-                self.logger.warning(f"❌ No se pudo asignar hotel al cluster {cluster.label}")
+                self.logger.info(f"✅ Cluster {cluster.label}: {closest_hotel['name']} (usuario, {min_distance:.2f}km)")
         
         return clusters
     
@@ -3346,12 +3330,6 @@ async def optimize_itinerary_hybrid_v31(
         )
     
     # 2. Enhanced home base assignment
-    logging.info(f"🏨 DEBUG: accommodations recibidas: {accommodations}")
-    logging.info(f"🏨 DEBUG: cantidad de accommodations: {len(accommodations) if accommodations else 0}")
-    if accommodations:
-        for i, acc in enumerate(accommodations):
-            logging.info(f"🏨 DEBUG Accommodation {i+1}: {acc.get('name', 'Sin nombre')}")
-    
     clusters = await optimizer.assign_home_base_to_clusters(clusters, accommodations, places)
     
     # 3. Allocate clusters to days

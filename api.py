@@ -317,13 +317,13 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
             except Exception as e:
                 logger.error(f"❌ Error recomendando hotel automáticamente: {e}")
         
-        # 🔍 Detectar si se enviaron hoteles/alojamientos explícitamente
-        accommodations_data = None
+        # 🔍 Detectar y consolidar TODOS los hoteles/alojamientos
+        accommodations_data = []
         hotels_provided = False
         
+        # 1. Procesar accommodations del campo dedicado
         if request.accommodations:
             try:
-                accommodations_data = []
                 for acc in request.accommodations:
                     if hasattr(acc, 'model_dump'):
                         accommodations_data.append(acc.model_dump())
@@ -331,10 +331,18 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                         accommodations_data.append(acc.dict())
                     else:
                         accommodations_data.append(acc)
-                hotels_provided = len(accommodations_data) > 0
             except Exception as e:
-                logger.warning(f"Error procesando accommodations: {e}")
-                accommodations_data = None
+                logger.warning(f"Error procesando request.accommodations: {e}")
+        
+        # 2. Procesar accommodations que vienen en places
+        if accommodations_in_places:
+            logger.info(f"🏨 Encontrados {len(accommodations_in_places)} accommodations en places")
+            for acc_place in accommodations_in_places:
+                logger.info(f"🏨 Agregando accommodation desde places: {acc_place.get('name', 'Sin nombre')}")
+                accommodations_data.append(acc_place)
+        
+        # 3. Verificar si tenemos accommodations del usuario
+        hotels_provided = len(accommodations_data) > 0
         
         logger.info(f"🚀 Iniciando optimización V3.1 ENHANCED para {len(normalized_places)} lugares")
         logger.info(f"📅 Período: {request.start_date} a {request.end_date}")
