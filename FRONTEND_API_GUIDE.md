@@ -1,189 +1,264 @@
-# 📋 Frontend API Guide - Multimodal Itinerary System
+# 🎯 ENDPOINTS PARA FRONTEND - GOVELING ML
 
-## 🎯 **Overview**
-Single universal endpoint that generates optimized itineraries for any location worldwide. Automatically detects if locations are in Chile (optimized) or international (fallback system).
+## 📍 Endpoint Principal Multimodal (RECOMENDADO)
 
----
+### `POST /itinerary/multimodal`
 
-## 🚀 **Endpoint**
-
-### **POST** `/itinerary/multimodal`
+**Este es el endpoint más avanzado que debe usar tu frontend** para generar itinerarios completos con lugares.
 
 **URL**: `https://your-api-domain.com/itinerary/multimodal`
 
----
-
-## 📤 **Request Format**
-
+#### � Request Body:
 ```json
 {
   "places": [
     {
-      "name": "Times Square",
-      "lat": 40.7580,
-      "lng": -73.9855,
-      "visit_duration_minutes": 60,
-      "category": "attraction"
+      "id": "opcional_uuid",
+      "name": "Plaza de Armas",
+      "lat": -33.4372,
+      "lon": -70.6506,
+      "type": "tourist_attraction",
+      "priority": 8,
+      "min_duration_hours": 1.5,
+      "rating": 4.5,
+      "address": "Plaza de Armas, Santiago, Chile",
+      "google_place_id": "ChIJ..."
     },
     {
-      "name": "Central Park",
-      "lat": 40.7829,
-      "lng": -73.9654,
-      "visit_duration_minutes": 90,
-      "category": "park"
-    },
-    {
-      "name": "Brooklyn Bridge",
-      "lat": 40.7061,
-      "lng": -73.9969,
-      "visit_duration_minutes": 45,
-      "category": "landmark"
+      "name": "Mercado Central",
+      "lat": -33.4333,
+      "lon": -70.6500,
+      "type": "food",
+      "priority": 7,
+      "min_duration_hours": 2.0
     }
   ],
-  "start_time": "09:00",
-  "available_time_hours": 8,
-  "transportation_mode": "walk"
+  "start_date": "2025-01-15",
+  "end_date": "2025-01-17",
+  "transport_mode": "drive",
+  "daily_start_hour": 9,
+  "daily_end_hour": 18,
+  "max_walking_distance_km": 15.0,
+  "max_daily_activities": 6,
+  "preferences": {
+    "culture_weight": 0.8,
+    "nature_weight": 0.6,
+    "food_weight": 0.9
+  },
+  "accommodations": []
 }
 ```
 
-### **Required Fields:**
-- `places`: Array of locations to visit
-- `start_time`: Start time in "HH:MM" format
-- `available_time_hours`: Total available time
-- `transportation_mode`: "walk", "drive", "bike", "transit"
+### ✅ Campos Obligatorios:
+- `places[].name` (string)
+- `places[].lat` (float, -90 a 90)
+- `places[].lon` (float, -180 a 180)
+- `start_date` (string: "YYYY-MM-DD")
+- `end_date` (string: "YYYY-MM-DD")
 
-### **Place Object:**
-- `name`: Location name (string)
-- `lat`: Latitude (float)
-- `lng`: Longitude (float) 
-- `visit_duration_minutes`: Time to spend at location (int)
-- `category`: Type of place (optional string)
+### 🔧 Campos Opcionales:
+- `transport_mode`: "walk" | "drive" | "transit" | "bike" (default: "walk")
+- `daily_start_hour`: 6-12 (default: 9)
+- `daily_end_hour`: 15-23 (default: 18)
+- `max_walking_distance_km`: 1-50 (default: 15.0)
+- `max_daily_activities`: 1-10 (default: 6)
+- `places[].type`: PlaceType enum (default: "point_of_interest")
+- `places[].priority`: 1-10 (default: 5)
+- `places[].min_duration_hours`: 0.5-8 (calculado automáticamente)
 
----
-
-## 📥 **Response Format**
-
+#### ✅ Response:
 ```json
 {
   "itinerary": [
     {
-      "place_name": "Times Square",
-      "lat": 40.7580,
-      "lng": -73.9855,
-      "start_time": "09:00",
-      "end_time": "10:00",
-      "visit_duration_minutes": 60,
-      "category": "attraction",
-      "order": 1
-    },
-    {
-      "place_name": "Central Park", 
-      "lat": 40.7829,
-      "lng": -73.9654,
-      "start_time": "10:15",
-      "end_time": "11:45", 
-      "visit_duration_minutes": 90,
-      "category": "park",
-      "order": 2
+      "day": 1,
+      "date": "2025-01-15",
+      "activities": [
+        {
+          "place": "Plaza de Armas",
+          "start": "09:00",
+          "end": "10:30",
+          "duration_h": 1.5,
+          "lat": -33.4372,
+          "lon": -70.6506,
+          "type": "tourist_attraction",
+          "name": "Plaza de Armas",
+          "category": "attraction",
+          "priority": 8
+        }
+      ],
+      "travel_summary": {
+        "total_distance_km": 12.5,
+        "total_travel_time_minutes": 45,
+        "transport_modes": ["drive"]
+      }
     }
   ],
-  "total_travel_time_minutes": 25,
-  "total_visit_time_minutes": 195,
-  "total_time_hours": 3.67,
-  "places_visited": 2,
-  "places_skipped": 1,
-  "efficiency_percentage": 89,
-  "recommendations": {
-    "optimization_used": "hybrid_routing",
-    "region": "international", 
-    "performance_note": "Using fallback routing system",
-    "estimated_costs": "Free routing (OSRM + fallback)"
-  }
+  "optimization_metrics": {
+    "total_distance_km": 45.2,
+    "total_travel_time_hours": 2.1,
+    "optimization_mode": "multimodal_hybrid_v31",
+    "multimodal_router_stats": {
+      "routes_calculated": 15,
+      "avg_calculation_time_ms": 180,
+      "precision_mode": "high"
+    }
+  },
+  "recommendations": [
+    "Itinerario optimizado usando rutas reales de Chile",
+    "Considera reservar con anticipación en temporada alta"
+  ]
 }
 ```
 
-### **Response Fields:**
+---
 
-#### **Itinerary Array:**
-- `place_name`: Name of the location
-- `lat/lng`: Coordinates  
-- `start_time/end_time`: Visit window in "HH:MM"
-- `visit_duration_minutes`: Actual time spent
-- `category`: Place type
-- `order`: Visit sequence
+## 🔄 Endpoints Alternativos
 
-#### **Summary:**
-- `total_travel_time_minutes`: Time spent moving between places
-- `total_visit_time_minutes`: Time spent at locations  
-- `total_time_hours`: Total itinerary duration
-- `places_visited/skipped`: Optimization results
-- `efficiency_percentage`: How well time was utilized
+### `POST /create_itinerary` (Endpoint Original)
+- Funciona igual que `/itinerary/multimodal`
+- Menos optimizado para Chile específicamente
+- Usa para compatibilidad con código existente
 
-#### **Recommendations:**
-- `optimization_used`: "chile_optimized" or "hybrid_routing"
-- `region`: "chile" or "international"
-- `performance_note`: System performance info
-- `estimated_costs`: Routing cost information
+### `POST /api/v2/itinerary/generate-hybrid` (Híbrido Avanzado)  
+- Optimizador híbrido V31
+- Misma estructura de request/response
+- Análisis semántico adicional
 
 ---
 
-## ⚡ **Performance**
+## 🌎 Tipos de Lugares Soportados
 
-### **Chile Locations** (Optimized)
-- **Response Time**: ~5 seconds
-- **Optimization**: Advanced cached graphs (2.5GB)
-- **Accuracy**: 95%+ routing precision
-- **Cost**: Free (cached data)
-
-### **International Locations** (Fallback)  
-- **Response Time**: ~12 seconds
-- **Optimization**: Intelligent fallback system
-- **Accuracy**: 90%+ routing precision
-- **Cost**: Free (OSRM) + backup (Google)
-
----
-
-## 🔄 **Example Requests**
-
-### **Chile Example:**
-```bash
-curl -X POST "https://your-api.com/itinerary/multimodal" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "places": [
-      {"name": "Plaza de Armas", "lat": -33.4372, "lng": -70.6506, "visit_duration_minutes": 45, "category": "plaza"},
-      {"name": "Cerro San Cristóbal", "lat": -33.4267, "lng": -70.6333, "visit_duration_minutes": 120, "category": "viewpoint"}
-    ],
-    "start_time": "10:00",
-    "available_time_hours": 6,
-    "transportation_mode": "walk"
-  }'
-```
-
-### **International Example:**
-```bash
-curl -X POST "https://your-api.com/itinerary/multimodal" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "places": [
-      {"name": "Times Square", "lat": 40.7580, "lng": -73.9855, "visit_duration_minutes": 60, "category": "attraction"},
-      {"name": "Central Park", "lat": 40.7829, "lng": -73.9654, "visit_duration_minutes": 90, "category": "park"}
-    ],
-    "start_time": "09:00", 
-    "available_time_hours": 8,
-    "transportation_mode": "walk"
-  }'
+```typescript
+enum PlaceType {
+  // Comida & Bebida
+  RESTAURANT = "restaurant",
+  CAFE = "cafe", 
+  BAR = "bar",
+  FOOD = "food",
+  
+  // Atracciones & Cultura
+  ATTRACTION = "attraction",
+  TOURIST_ATTRACTION = "tourist_attraction", 
+  MUSEUM = "museum",
+  MONUMENT = "monument",
+  CHURCH = "church",
+  ART_GALLERY = "art_gallery",
+  
+  // Naturaleza & Outdoor
+  PARK = "park",
+  BEACH = "beach",
+  VIEWPOINT = "viewpoint", 
+  NATURAL_FEATURE = "natural_feature",
+  ZOO = "zoo",
+  
+  // Shopping & Entretenimiento
+  SHOPPING = "shopping",
+  SHOPPING_MALL = "shopping_mall",
+  STORE = "store", 
+  MOVIE_THEATER = "movie_theater",
+  NIGHT_CLUB = "night_club",
+  
+  // Alojamiento
+  LODGING = "lodging",
+  ACCOMMODATION = "accommodation",
+  
+  // General
+  POINT_OF_INTEREST = "point_of_interest",
+  ESTABLISHMENT = "establishment"
+}
 ```
 
 ---
 
-## 🛡️ **Error Handling**
+## � URL Base
 
-### **Validation Errors (422):**
+### Producción (Render):
+```
+https://tu-app.onrender.com/itinerary/multimodal
+```
+
+### Desarrollo Local:
+```
+http://localhost:8000/itinerary/multimodal
+```
+
+---
+
+## 💡 Tips para el Frontend
+
+1. **Validación Local**: Valida lat/lon antes de enviar
+2. **Timeout**: Usa timeout de 60-120 segundos para requests complejos
+3. **Cache**: Considera cachear responses por combinación de places+dates
+4. **Fallback**: Si `/multimodal` falla, usa `/create_itinerary` como fallback
+5. **Progress**: Muestra loading spinner - el procesamiento puede tomar 10-30 segundos
+
+---
+
+## 🔍 Health Check
+
+### `GET /health/multimodal`
+Verifica que el sistema multimodal esté funcionando:
+
+```json
+{
+  "status": "healthy",
+  "multimodal_router": "available",
+  "chile_graphs_loaded": true,
+  "version": "v3.1"
+}
+```
+
+### Ejemplo completo cURL:
+```bash
+curl -X POST "https://tu-app.onrender.com/itinerary/multimodal" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "places": [
+      {
+        "name": "Plaza de Armas",
+        "lat": -33.4372,
+        "lon": -70.6506,
+        "type": "tourist_attraction",
+        "priority": 8
+      },
+      {
+        "name": "Cerro San Cristóbal", 
+        "lat": -33.4267,
+        "lon": -70.6333,
+        "type": "viewpoint",
+        "priority": 9
+      }
+    ],
+    "start_date": "2025-01-15",
+    "end_date": "2025-01-16",
+    "transport_mode": "drive",
+    "daily_start_hour": 9,
+    "daily_end_hour": 17
+  }'
+```
+
+## 🛡️ Manejo de Errores
+
+### Error 422 (Validación):
 ```json
 {
   "detail": [
     {
+      "type": "missing",
+      "loc": ["body", "places", 0, "lat"],
+      "msg": "Field required"
+    }
+  ]
+}
+```
+
+### Error 500 (Interno):
+```json
+{
+  "detail": "Error interno del servidor",
+  "error_code": "OPTIMIZATION_FAILED"
+}
       "loc": ["body", "places"],
       "msg": "ensure this value has at least 1 items",
       "type": "value_error"
