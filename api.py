@@ -2562,45 +2562,29 @@ async def get_metrics_summary(hours: int = 24):
 chile_multimodal_router = None
 
 def get_chile_router():
-    """Obtener o inicializar el router multi-modal (lazy loading con cloud download)"""
+    """Obtener o inicializar el router multi-modal (lazy loading con S3 download)"""
     global chile_multimodal_router
     
     if chile_multimodal_router is None:
         try:
             from services.chile_multimodal_router import ChileMultiModalRouter
             
-            # Intentar inicializar con cache local
-            chile_multimodal_router = ChileMultiModalRouter()
-            
-            # Si no hay grafos locales, intentar descargar desde Google Drive
-            cache_status = chile_multimodal_router.get_cache_status()
-            missing_critical = [
-                mode for mode, status in cache_status.items() 
-                if not status['exists'] and mode in ['drive', 'walk']
-            ]
-            
-            if missing_critical:
-                logger.info(f"📂 Grafos críticos faltantes: {missing_critical}")
-                logger.info("📥 Intentando descargar desde Google Drive...")
+            # Intentar descargar grafos críticos desde S3 automáticamente
+            try:
+                from utils.s3_graphs_manager import S3GraphsManager
+                s3_manager = S3GraphsManager()
                 
-                try:
-                    from utils.google_drive_manager import GoogleDriveGraphsManager
-                    drive_manager = GoogleDriveGraphsManager()
+                if s3_manager.s3_client:  # Solo si S3 está configurado
+                    logger.info("☁️ Verificando grafos críticos en Amazon S3...")
+                    s3_manager.ensure_critical_graphs()
+                else:
+                    logger.info("⚠️ S3 no configurado, usando grafos locales disponibles")
                     
-                    # Descargar solo grafos críticos en producción
-                    download_results = drive_manager.download_all_graphs(priority_only=True)
-                    successful_downloads = sum(download_results.values())
-                    
-                    if successful_downloads > 0:
-                        logger.info(f"✅ {successful_downloads} grafos descargados desde Google Drive")
-                        # Re-inicializar router con nuevos grafos
-                        chile_multimodal_router = ChileMultiModalRouter()
-                    else:
-                        logger.warning("⚠️ No se pudieron descargar grafos - usando fallback")
-                        
-                except Exception as drive_error:
-                    logger.warning(f"⚠️ Google Drive download falló: {drive_error} - usando fallback")
+            except Exception as s3_error:
+                logger.warning(f"⚠️ S3 download falló: {s3_error} - usando grafos locales")
             
+            # Inicializar router (con o sin cache S3)
+            chile_multimodal_router = ChileMultiModalRouter()
             logger.info("✅ ChileMultiModalRouter inicializado correctamente")
             
         except Exception as e:

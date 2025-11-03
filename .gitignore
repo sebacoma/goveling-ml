@@ -107,3 +107,7 @@ __pycache__/
 # Google Drive config (mantener template, excluir config con IDs reales)
 google_drive_config.json
 # Mantener: google_drive_config.template.json (template sin IDs reales)
+
+# S3 config (mantener template, excluir config con credenciales reales)
+s3_config.json
+# Mantener: s3_config.template.json (template sin credenciales reales)

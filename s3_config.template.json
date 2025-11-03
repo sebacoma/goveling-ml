@@ -1,0 +1,48 @@
+{
+  "bucket_name": "goveling-ml-graphs",
+  "region": "us-east-1",
+  "prefix": "chile-graphs/v1",
+  
+  "aws_access_key_id": "YOUR_ACCESS_KEY_ID",
+  "aws_secret_access_key": "YOUR_SECRET_ACCESS_KEY",
+  
+  "_comment_credentials": "ALTERNATIVAS PARA CREDENCIALES:",
+  "_comment_env": "1. Variables de entorno: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY",
+  "_comment_iam": "2. IAM Role (recomendado para producción)",
+  "_comment_profile": "3. AWS CLI profile configurado",
+  
+  "files": {
+    "chile_graph_cache.pkl": {
+      "description": "Grafo principal de Chile para routing multimodal",
+      "priority": "critical",
+      "size_mb": 1800,
+      "compressed_size_mb": 625
+    },
+    "chile_nodes_dict.pkl": {
+      "description": "Diccionario de nodos de Chile con metadatos",
+      "priority": "critical", 
+      "size_mb": 488,
+      "compressed_size_mb": 240
+    },
+    "santiago_metro_walking_cache.pkl": {
+      "description": "Red peatonal integrada con Metro Santiago",
+      "priority": "high",
+      "size_mb": 368,
+      "compressed_size_mb": 128
+    },
+    "santiago_metro_cycling_cache.pkl": {
+      "description": "Red ciclista integrada con Metro Santiago", 
+      "priority": "medium",
+      "size_mb": 336,
+      "compressed_size_mb": 112
+    }
+  },
+  
+  "_settings": {
+    "auto_compress": true,
+    "keep_compressed_local": true,
+    "download_timeout_seconds": 300,
+    "upload_timeout_seconds": 600,
+    "retry_attempts": 3
+  }
+}
