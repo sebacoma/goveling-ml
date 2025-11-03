@@ -22,3 +22,13 @@ typing-extensions>=4.8.0
 
 # Location services
 overpy>=0.6
+geopy>=2.3.0
+
+# City2Graph & Semantic Analysis Dependencies
+osmnx>=1.6.0
+networkx>=3.0
+geopandas>=0.14.0
+shapely>=2.0.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+folium>=0.15.0

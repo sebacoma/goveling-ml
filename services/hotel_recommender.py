@@ -1,12 +1,15 @@
 """
-🏨 Sistema de Recomendación de Hoteles
-Recomienda hoteles basado en la ubicación de los lugares a visitar
+🏨 Sistema de Recomendación de Hoteles - Multi-Ciudad Enhanced
+Recomienda hoteles para viajes multi-ciudad con scheduling inteligente
+Soporta intercity travel, multi-day stays, y accommodation orchestration
 """
 
 import logging
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional, Set
+from dataclasses import dataclass, field
 import math
+from datetime import datetime, timedelta
+from geopy.distance import geodesic
 
 @dataclass
 class HotelRecommendation:
@@ -21,12 +24,43 @@ class HotelRecommendation:
     avg_distance_to_places_km: float = 0.0
     convenience_score: float = 0.0
     reasoning: str = ""
+    
+    # Multi-ciudad enhancements
+    city: str = ""
+    country: str = ""
+    supports_multi_night: bool = True
+    intercity_accessibility: float = 0.0  # Score for intercity travel convenience
+
+@dataclass
+class MultiCityAccommodationPlan:
+    """Plan de accommodations para viaje multi-ciudad"""
+    accommodations: List[Dict] = field(default_factory=list)
+    total_nights: int = 0
+    total_cities: int = 0
+    estimated_cost: float = 0.0
+    intercity_optimization: Dict = field(default_factory=dict)
+    
+    def add_city_accommodation(self, city: str, hotel: HotelRecommendation, 
+                             nights: int, check_in_day: int):
+        """Añade accommodation para una ciudad específica"""
+        self.accommodations.append({
+            'city': city,
+            'hotel': hotel,
+            'nights': nights,
+            'check_in_day': check_in_day,
+            'check_out_day': check_in_day + nights,
+            'coordinates': (hotel.lat, hotel.lon)
+        })
+        
+    def get_accommodation_sequence(self) -> List[str]:
+        """Retorna secuencia de ciudades con accommodations"""
+        return [acc['city'] for acc in sorted(self.accommodations, key=lambda x: x['check_in_day'])]
 
 class HotelRecommender:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         
-        # Base de datos de hoteles por ciudad
+        # Base de datos de hoteles por ciudad (expandida para multi-ciudad)
         self.hotel_database = {
             "santiago": [
                 {
@@ -151,6 +185,129 @@ class HotelRecommender:
                 "lon": -68.9215,
                 "address": "Av. Balmaceda 2634, Calama",
                 "rating": 4.1,
+                "price_range": "medium"
+            }
+        ],
+        # Ciudades europeas para multi-ciudad
+        "paris": [
+            {
+                "name": "Hotel Le Meurice",
+                "lat": 48.8656,
+                "lon": 2.3279,
+                "address": "228 Rue de Rivoli, Paris",
+                "rating": 4.8,
+                "price_range": "high"
+            },
+            {
+                "name": "Hotel des Grands Boulevards",
+                "lat": 48.8719,
+                "lon": 2.3432,
+                "address": "17 Boulevard Poissonnière, Paris",
+                "rating": 4.5,
+                "price_range": "high"
+            },
+            {
+                "name": "Hotel Malte Opera",
+                "lat": 48.8719,
+                "lon": 2.3432,
+                "address": "63 Rue de Richelieu, Paris",
+                "rating": 4.2,
+                "price_range": "medium"
+            },
+            {
+                "name": "Hotel ibis Paris Centre",
+                "lat": 48.8566,
+                "lon": 2.3522,
+                "address": "35 Boulevard Saint-Marcel, Paris",
+                "rating": 4.0,
+                "price_range": "medium"
+            }
+        ],
+        "amsterdam": [
+            {
+                "name": "Waldorf Astoria Amsterdam",
+                "lat": 52.3676,
+                "lon": 4.9041,
+                "address": "Herengracht 542-556, Amsterdam",
+                "rating": 4.7,
+                "price_range": "high"
+            },
+            {
+                "name": "Hotel V Nesplein",
+                "lat": 52.3654,
+                "lon": 4.8944,
+                "address": "Nesplein 49, Amsterdam",
+                "rating": 4.4,
+                "price_range": "medium"
+            },
+            {
+                "name": "Hotel NH Amsterdam Centre",
+                "lat": 52.3702,
+                "lon": 4.8952,
+                "address": "Stadhouderskade 7, Amsterdam",
+                "rating": 4.2,
+                "price_range": "medium"
+            }
+        ],
+        "berlin": [
+            {
+                "name": "Hotel Adlon Kempinski Berlin",
+                "lat": 52.5163,
+                "lon": 13.3777,
+                "address": "Unter den Linden 77, Berlin",
+                "rating": 4.8,
+                "price_range": "high"
+            },
+            {
+                "name": "Meininger Hotel Berlin Mitte",
+                "lat": 52.5200,
+                "lon": 13.4050,
+                "address": "Hallesches Ufer 30, Berlin",
+                "rating": 4.1,
+                "price_range": "low"
+            },
+            {
+                "name": "Hotel Hackescher Hof",
+                "lat": 52.5243,
+                "lon": 13.4015,
+                "address": "Große Präsidentenstraße 8, Berlin",
+                "rating": 4.3,
+                "price_range": "medium"
+            }
+        ],
+        "rome": [
+            {
+                "name": "Hotel de Russie",
+                "lat": 41.9109,
+                "lon": 12.4776,
+                "address": "Via del Babuino 9, Rome",
+                "rating": 4.7,
+                "price_range": "high"
+            },
+            {
+                "name": "Hotel Artemide",
+                "lat": 41.9028,
+                "lon": 12.4964,
+                "address": "Via Nazionale 22, Rome",
+                "rating": 4.4,
+                "price_range": "medium"
+            }
+        ],
+        "barcelona": [
+            {
+                "name": "Hotel Casa Fuster",
+                "lat": 41.4036,
+                "lon": 2.1540,
+                "address": "Passeig de Gràcia 132, Barcelona",
+                "rating": 4.6,
+                "price_range": "high"
+            },
+            {
+                "name": "Hotel Barcelona Gothic",
+                "lat": 41.3851,
+                "lon": 2.1734,
+                "address": "Carrer Jaume I, 14, Barcelona",
+                "rating": 4.2,
                 "price_range": "medium"
             }
         ]
@@ -358,3 +515,239 @@ class HotelRecommender:
             }
             for i, rec in enumerate(recommendations)
         ]
+    
+    # ===== MULTI-CIUDAD ENHANCEMENTS =====
+    
+    def plan_multi_city_accommodations(self, cities: List[Dict], 
+                                     days_per_city: Dict[str, int]) -> MultiCityAccommodationPlan:
+        """
+        Planifica accommodations para viaje multi-ciudad
+        
+        Args:
+            cities: Lista de ciudades con info [{'name': str, 'pois': List[Dict], 'coordinates': Tuple}]
+            days_per_city: Días por ciudad {'city_name': days}
+            
+        Returns:
+            Plan completo de accommodations multi-ciudad
+        """
+        self.logger.info(f"🏨 Planificando accommodations para {len(cities)} ciudades")
+        
+        plan = MultiCityAccommodationPlan()
+        current_day = 1
+        
+        for city_info in cities:
+            city_name = city_info['name']
+            city_pois = city_info.get('pois', [])
+            city_days = days_per_city.get(city_name, 1)
+            
+            if city_days <= 1:
+                # Solo 1 día, no necesita accommodation overnight
+                continue
+            
+            # Encontrar mejor hotel para esta ciudad
+            # Por ahora, usar búsqueda directa por ciudad para mejor precisión
+            hotels = self.find_hotels_by_city_name(city_name, max_recommendations=3)
+            
+            if hotels:
+                best_hotel = hotels[0]  # El mejor-rankeado
+                
+                # Mejorar información del hotel para multi-ciudad
+                best_hotel.city = city_name
+                best_hotel.intercity_accessibility = self._calculate_intercity_accessibility(
+                    best_hotel, city_info['coordinates']
+                )
+                
+                # Añadir al plan
+                plan.add_city_accommodation(
+                    city=city_name,
+                    hotel=best_hotel,
+                    nights=city_days - 1,  # -1 porque el último día se viaja
+                    check_in_day=current_day
+                )
+                
+                self.logger.info(f"🏨 {city_name}: {best_hotel.name} por {city_days-1} noches (días {current_day}-{current_day + city_days - 2})")
+            
+            current_day += city_days
+        
+        # Calcular estadísticas del plan
+        plan.total_nights = sum(acc['nights'] for acc in plan.accommodations)
+        plan.total_cities = len(plan.accommodations)
+        plan.estimated_cost = self._estimate_accommodation_costs(plan)
+        plan.intercity_optimization = self._analyze_intercity_logistics(plan)
+        
+        self.logger.info(f"✅ Plan multi-ciudad: {plan.total_nights} noches en {plan.total_cities} ciudades")
+        
+        return plan
+    
+    def find_hotels_by_city_name(self, city_name: str, max_recommendations: int = 5) -> List[HotelRecommendation]:
+        """
+        Encuentra hoteles por nombre de ciudad (para ciudades sin POIs específicos)
+        
+        Args:
+            city_name: Nombre de la ciudad
+            max_recommendations: Número máximo de recomendaciones
+            
+        Returns:
+            Lista de hoteles recomendados
+        """
+        city_key = city_name.lower().replace(' ', '_')
+        
+        # Buscar en database local
+        if city_key in self.hotel_database:
+            hotels = self.hotel_database[city_key][:max_recommendations]
+            
+            recommendations = []
+            for hotel in hotels:
+                rec = HotelRecommendation(
+                    name=hotel['name'],
+                    lat=hotel['lat'],
+                    lon=hotel['lon'],
+                    address=hotel.get('address', ''),
+                    rating=hotel.get('rating', 0.0),
+                    price_range=hotel.get('price_range', 'medium'),
+                    city=city_name,
+                    convenience_score=hotel.get('rating', 0.0) / 5.0,  # Normalizar rating como score
+                    reasoning=f"Hotel encontrado por búsqueda de ciudad: {city_name}"
+                )
+                recommendations.append(rec)
+            
+            return recommendations
+        
+        # Si no se encuentra, generar hotel sintético centrado en la ciudad
+        return self._generate_synthetic_hotel_for_city(city_name)
+    
+    def optimize_accommodation_sequence(self, plan: MultiCityAccommodationPlan, 
+                                      city_travel_sequence: List[str]) -> MultiCityAccommodationPlan:
+        """
+        Optimiza la secuencia de accommodations según el orden de viaje de ciudades
+        
+        Args:
+            plan: Plan de accommodations original
+            city_travel_sequence: Secuencia optimizada de ciudades
+            
+        Returns:
+            Plan optimizado según secuencia de viaje
+        """
+        # Reordenar accommodations según secuencia de ciudades
+        accommodation_map = {acc['city']: acc for acc in plan.accommodations}
+        
+        optimized_accommodations = []
+        current_day = 1
+        
+        for city in city_travel_sequence:
+            if city in accommodation_map:
+                acc = accommodation_map[city].copy()
+                acc['check_in_day'] = current_day
+                acc['check_out_day'] = current_day + acc['nights']
+                optimized_accommodations.append(acc)
+                current_day += acc['nights'] + 1  # +1 para día de viaje
+        
+        # Crear plan optimizado
+        optimized_plan = MultiCityAccommodationPlan(
+            accommodations=optimized_accommodations,
+            total_nights=plan.total_nights,
+            total_cities=plan.total_cities,
+            estimated_cost=plan.estimated_cost
+        )
+        
+        return optimized_plan
+    
+    def _calculate_intercity_accessibility(self, hotel: HotelRecommendation, 
+                                         city_coordinates: Tuple[float, float]) -> float:
+        """Calcula score de accesibilidad intercity del hotel"""
+        # Distancia del hotel al centro de la ciudad
+        hotel_coord = (hotel.lat, hotel.lon)
+        distance_to_center = geodesic(hotel_coord, city_coordinates).kilometers
+        
+        # Score basado en proximidad al centro (mejor para intercity travel)
+        accessibility_score = max(0.0, 1.0 - (distance_to_center / 20.0))  # 20km = score 0
+        
+        return accessibility_score
+    
+    def _estimate_accommodation_costs(self, plan: MultiCityAccommodationPlan) -> float:
+        """Estima costos totales de accommodations"""
+        price_ranges = {
+            'low': 50.0,      # USD por noche
+            'medium': 120.0,
+            'high': 250.0
+        }
+        
+        total_cost = 0.0
+        for acc in plan.accommodations:
+            hotel = acc['hotel']
+            nights = acc['nights']
+            price_per_night = price_ranges.get(hotel.price_range, 120.0)
+            total_cost += price_per_night * nights
+        
+        return total_cost
+    
+    def _analyze_intercity_logistics(self, plan: MultiCityAccommodationPlan) -> Dict:
+        """Analiza logística intercity del plan de accommodations"""
+        if len(plan.accommodations) <= 1:
+            return {'complexity': 'simple', 'logistics_score': 1.0}
+        
+        # Calcular distancias entre hoteles consecutivos
+        distances = []
+        for i in range(len(plan.accommodations) - 1):
+            hotel1 = plan.accommodations[i]['hotel']
+            hotel2 = plan.accommodations[i + 1]['hotel']
+            
+            coord1 = (hotel1.lat, hotel1.lon)
+            coord2 = (hotel2.lat, hotel2.lon)
+            distance = geodesic(coord1, coord2).kilometers
+            distances.append(distance)
+        
+        avg_intercity_distance = sum(distances) / len(distances) if distances else 0
+        max_intercity_distance = max(distances) if distances else 0
+        
+        # Score logístico (distancias más cortas = mejor)
+        logistics_score = max(0.1, 1.0 - (avg_intercity_distance / 1000.0))  # 1000km = score 0.1
+        
+        complexity = 'simple'
+        if max_intercity_distance > 800:
+            complexity = 'international'
+        elif avg_intercity_distance > 300:
+            complexity = 'intercity'
+        
+        return {
+            'complexity': complexity,
+            'logistics_score': logistics_score,
+            'avg_intercity_distance_km': avg_intercity_distance,
+            'max_intercity_distance_km': max_intercity_distance,
+            'total_accommodation_changes': len(plan.accommodations)
+        }
+    
+    def _generate_synthetic_hotel_for_city(self, city_name: str) -> List[HotelRecommendation]:
+        """Genera hotel sintético para ciudades sin data específica"""
+        # Coordenadas sintéticas básicas (esto se podría mejorar con geocoding)
+        synthetic_coords = self._get_synthetic_city_coordinates(city_name)
+        
+        synthetic_hotel = HotelRecommendation(
+            name=f"Hotel Central {city_name}",
+            lat=synthetic_coords[0],
+            lon=synthetic_coords[1],
+            address=f"Centro de {city_name}",
+            rating=4.0,  # Rating por defecto
+            price_range="medium",
+            city=city_name,
+            convenience_score=0.7,  # Score moderado por ser sintético
+            reasoning=f"Hotel sintético generado para {city_name} (sin data específica disponible)"
+        )
+        
+        return [synthetic_hotel]
+    
+    def _get_synthetic_city_coordinates(self, city_name: str) -> Tuple[float, float]:
+        """Retorna coordenadas sintéticas para ciudades conocidas"""
+        city_coords = {
+            'paris': (48.8566, 2.3522),
+            'london': (51.5074, -0.1278),
+            'berlin': (52.5200, 13.4050),
+            'madrid': (40.4168, -3.7038),
+            'rome': (41.9028, 12.4964),
+            'amsterdam': (52.3676, 4.9041),
+            'barcelona': (41.3851, 2.1734),
+            'santiago': (-33.4489, -70.6693),
+            'valparaiso': (-33.0472, -71.6127)
+        }
+        
+        return city_coords.get(city_name.lower(), (0.0, 0.0))  # Default to equator

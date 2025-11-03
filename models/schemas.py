@@ -241,3 +241,71 @@ class PlaceSuggestionResponse(BaseModel):
     cultural_immersion: PlaceSuggestion
     adventure_day: PlaceSuggestion
     performance: Optional[Dict] = None
+
+# ===== MULTI-CIUDAD SCHEMAS =====
+
+class MultiCityOptimizationRequest(BaseModel):
+    """Request para optimización multi-ciudad"""
+    places: List[Place] = Field(..., description="Lista de POIs a visitar")
+    duration_days: int = Field(..., gt=0, le=30, description="Duración del viaje en días")
+    start_city: Optional[str] = Field(None, description="Ciudad de inicio preferida")
+    optimization_level: Literal["fast", "balanced", "thorough"] = Field("balanced")
+    include_accommodations: bool = Field(True, description="Incluir recomendaciones de hoteles")
+    budget_level: Literal["budget", "mid_range", "luxury"] = Field("mid_range")
+    
+class CityInfo(BaseModel):
+    """Información de una ciudad en el itinerario"""
+    name: str
+    country: str
+    coordinates: Coordinates
+    pois_count: int
+    assigned_days: int
+    
+class AccommodationInfo(BaseModel):
+    """Información de accommodation"""
+    city: str
+    hotel_name: str
+    rating: float
+    price_range: str
+    nights: int
+    check_in_day: int
+    check_out_day: int
+    estimated_cost_usd: float
+    coordinates: Coordinates
+
+class MultiCityItineraryResponse(BaseModel):
+    """Response completa de itinerario multi-ciudad"""
+    success: bool
+    cities: List[CityInfo]
+    city_sequence: List[str] = Field(..., description="Secuencia optimizada de ciudades")
+    daily_schedule: Dict[int, List[Place]] = Field(..., description="Schedule día por día")
+    accommodations: List[AccommodationInfo] = Field(default_factory=list)
+    
+    # Métricas del viaje
+    total_duration_days: int
+    countries_count: int
+    total_distance_km: float
+    estimated_accommodation_cost_usd: float
+    
+    # Metadata de optimización
+    optimization_strategy: str
+    confidence: float
+    processing_time_ms: float
+    
+    # Análisis logístico
+    logistics: Dict = Field(default_factory=dict, description="Análisis de complejidad logística")
+    
+class MultiCityAnalysisRequest(BaseModel):
+    """Request para análisis de viabilidad multi-ciudad"""
+    places: List[Place]
+    
+class MultiCityAnalysisResponse(BaseModel):
+    """Response de análisis multi-ciudad"""
+    cities_detected: int
+    countries_detected: int  
+    max_intercity_distance_km: float
+    complexity_level: Literal["simple", "intercity", "international", "complex", "international_complex"]
+    recommended_duration_days: int
+    optimization_recommendation: str
+    feasibility_score: float = Field(..., ge=0, le=1)
+    warnings: List[str] = Field(default_factory=list)

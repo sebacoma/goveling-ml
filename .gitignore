@@ -90,3 +90,15 @@ api_simple.py
 # Data files (if any)
 data/
 models/*.pkl
+# Exclude large cache files from git
+cache/*.json
+cache/*.pkl
+city2graph_cache/
+city2graph_real_cache/
+cache_backup/
+__pycache__/
+*.pyc
+
+# Keep essential cache structure but ignore large files
+!cache/.gitkeep
+!cache/README.md
