@@ -12,7 +12,6 @@ import networkx as nx
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
-from rtree import index
 import math
 import asyncio
 from functools import lru_cache
@@ -20,6 +19,16 @@ from functools import lru_cache
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Rtree como dependencia opcional (problemas en Render)
+try:
+    from rtree import index
+    RTREE_AVAILABLE = True
+    logger.info("✅ R-tree disponible para indexado espacial optimizado")
+except ImportError:
+    RTREE_AVAILABLE = False
+    logger.warning("⚠️ R-tree no disponible, usando fallback con búsqueda lineal")
+    index = None
 
 @dataclass
 class RouteResult:
@@ -107,6 +116,8 @@ class HybridCity2GraphService:
         self.data_dir = Path(data_dir)
         self.graph: Optional[nx.DiGraph] = None
         self.spatial_index: Optional[index.Index] = None
+        # Fallback para cuando rtree no está disponible
+        self.node_coords_list: List[Tuple[int, float, float]] = []
         self.nodes_df: Optional[pd.DataFrame] = None
         self.edges_df: Optional[pd.DataFrame] = None
         self.node_coords: Dict[int, Tuple[float, float]] = {}
@@ -199,50 +210,71 @@ class HybridCity2GraphService:
         logger.info(f"✅ Grafo construido en {elapsed:.1f}s: {self.graph.number_of_nodes():,} nodos, {self.graph.number_of_edges():,} aristas")
     
     def _build_spatial_index(self):
-        """Construye R-tree para búsquedas espaciales rápidas"""
+        """Construye índice espacial (R-tree o fallback)"""
         logger.info("🗺️ Construyendo índice espacial...")
         start_time = time.time()
         
-        # Crear índice R-tree
-        self.spatial_index = index.Index()
-        
-        # Insertar nodos en el índice
-        for node_id, (lat, lon) in self.node_coords.items():
-            # R-tree usa (min_x, min_y, max_x, max_y)
-            self.spatial_index.insert(node_id, (lon, lat, lon, lat))
+        if RTREE_AVAILABLE and index:
+            # Usar R-tree optimizado
+            self.spatial_index = index.Index()
+            
+            # Insertar nodos en el índice
+            for node_id, (lat, lon) in self.node_coords.items():
+                # R-tree usa (min_x, min_y, max_x, max_y)
+                self.spatial_index.insert(node_id, (lon, lat, lon, lat))
+                
+            logger.info("✅ Usando R-tree optimizado")
+        else:
+            # Fallback: lista simple para búsqueda lineal
+            self.node_coords_list = [
+                (node_id, lat, lon) 
+                for node_id, (lat, lon) in self.node_coords.items()
+            ]
+            logger.info("⚠️ Usando fallback con búsqueda lineal (sin R-tree)")
         
         elapsed = time.time() - start_time
         logger.info(f"✅ Índice espacial construido en {elapsed:.1f}s")
     
     @lru_cache(maxsize=10000)
     def find_nearest_node(self, lat: float, lon: float, max_distance_m: float = 1000) -> Optional[NearestNodeResult]:
-        """Encuentra el nodo más cercano usando R-tree"""
-        if not self.spatial_index:
-            return None
+        """Encuentra el nodo más cercano (R-tree o fallback)"""
         
-        # Convertir distancia a grados aproximadamente
-        deg_distance = max_distance_m / 111000  # ~111km por grado
-        
-        # Buscar nodos candidatos
-        candidates = list(self.spatial_index.intersection((
-            lon - deg_distance, lat - deg_distance,
-            lon + deg_distance, lat + deg_distance
-        )))
-        
-        if not candidates:
-            return None
-        
-        # Encontrar el más cercano
-        min_distance = float('inf')
-        nearest_node = None
-        
-        for node_id in candidates:
-            node_lat, node_lon = self.node_coords[node_id]
-            distance = self._haversine_distance(lat, lon, node_lat, node_lon)
+        if RTREE_AVAILABLE and self.spatial_index:
+            # Usar R-tree optimizado
+            # Convertir distancia a grados aproximadamente
+            deg_distance = max_distance_m / 111000  # ~111km por grado
             
-            if distance < min_distance:
-                min_distance = distance
-                nearest_node = node_id
+            # Buscar nodos candidatos
+            candidates = list(self.spatial_index.intersection((
+                lon - deg_distance, lat - deg_distance,
+                lon + deg_distance, lat + deg_distance
+            )))
+            
+            if not candidates:
+                return None
+            
+            # Encontrar el más cercano
+            min_distance = float('inf')
+            nearest_node = None
+            
+            for node_id in candidates:
+                node_lat, node_lon = self.node_coords[node_id]
+                distance = self._haversine_distance(lat, lon, node_lat, node_lon)
+                
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_node = node_id
+        else:
+            # Fallback: búsqueda lineal (menos eficiente pero funciona)
+            min_distance = float('inf')
+            nearest_node = None
+            
+            for node_id, node_lat, node_lon in self.node_coords_list:
+                distance = self._haversine_distance(lat, lon, node_lat, node_lon)
+                
+                if distance < max_distance_m and distance < min_distance:
+                    min_distance = distance
+                    nearest_node = node_id
         
         if nearest_node and min_distance <= max_distance_m:
             node_lat, node_lon = self.node_coords[nearest_node]

@@ -30,6 +30,7 @@ geopy>=2.3.0
 
 # Spatial indexing
 h3>=3.7.0
+# rtree>=1.0.0  # Comentado: problemas con libspatialindex en Render
 
 # Optimization & Routing
 ortools>=9.8.0
