@@ -1,0 +1,26 @@
+{
+  "chile_graph_cache.pkl": {
+    "drive_url": "https://drive.google.com/file/d/REPLACE_WITH_FILE_ID/view?usp=sharing",
+    "direct_url": "https://drive.google.com/uc?id=REPLACE_WITH_FILE_ID&export=download",
+    "description": "Grafo principal de Chile (1.8GB → 625MB comprimido)",
+    "priority": "critical"
+  },
+  "chile_nodes_dict.pkl": {
+    "drive_url": "https://drive.google.com/file/d/REPLACE_WITH_FILE_ID/view?usp=sharing", 
+    "direct_url": "https://drive.google.com/uc?id=REPLACE_WITH_FILE_ID&export=download",
+    "description": "Diccionario de nodos Chile (488MB → 240MB comprimido)",
+    "priority": "critical"
+  },
+  "santiago_metro_walking_cache.pkl": {
+    "drive_url": "https://drive.google.com/file/d/REPLACE_WITH_FILE_ID/view?usp=sharing",
+    "direct_url": "https://drive.google.com/uc?id=REPLACE_WITH_FILE_ID&export=download",
+    "description": "Red peatonal Santiago (368MB → 128MB comprimido)",
+    "priority": "high"
+  },
+  "santiago_metro_cycling_cache.pkl": {
+    "drive_url": "https://drive.google.com/file/d/REPLACE_WITH_FILE_ID/view?usp=sharing",
+    "direct_url": "https://drive.google.com/uc?id=REPLACE_WITH_FILE_ID&export=download",
+    "description": "Red ciclista Santiago (336MB → 112MB comprimido)",
+    "priority": "medium"
+  }
+}

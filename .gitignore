@@ -93,6 +93,7 @@ models/*.pkl
 # Exclude large cache files from git
 cache/*.json
 cache/*.pkl
+cache/*.gz
 city2graph_cache/
 city2graph_real_cache/
 cache_backup/
@@ -102,3 +103,7 @@ __pycache__/
 # Keep essential cache structure but ignore large files
 !cache/.gitkeep
 !cache/README.md
+
+# Google Drive config (mantener template, excluir config con IDs reales)
+google_drive_config.json
+# Mantener: google_drive_config.template.json (template sin IDs reales)

@@ -2562,14 +2562,47 @@ async def get_metrics_summary(hours: int = 24):
 chile_multimodal_router = None
 
 def get_chile_router():
-    """Obtener o inicializar el router multi-modal (lazy loading)"""
+    """Obtener o inicializar el router multi-modal (lazy loading con cloud download)"""
     global chile_multimodal_router
     
     if chile_multimodal_router is None:
         try:
             from services.chile_multimodal_router import ChileMultiModalRouter
+            
+            # Intentar inicializar con cache local
             chile_multimodal_router = ChileMultiModalRouter()
+            
+            # Si no hay grafos locales, intentar descargar desde Google Drive
+            cache_status = chile_multimodal_router.get_cache_status()
+            missing_critical = [
+                mode for mode, status in cache_status.items() 
+                if not status['exists'] and mode in ['drive', 'walk']
+            ]
+            
+            if missing_critical:
+                logger.info(f"📂 Grafos críticos faltantes: {missing_critical}")
+                logger.info("📥 Intentando descargar desde Google Drive...")
+                
+                try:
+                    from utils.google_drive_manager import GoogleDriveGraphsManager
+                    drive_manager = GoogleDriveGraphsManager()
+                    
+                    # Descargar solo grafos críticos en producción
+                    download_results = drive_manager.download_all_graphs(priority_only=True)
+                    successful_downloads = sum(download_results.values())
+                    
+                    if successful_downloads > 0:
+                        logger.info(f"✅ {successful_downloads} grafos descargados desde Google Drive")
+                        # Re-inicializar router con nuevos grafos
+                        chile_multimodal_router = ChileMultiModalRouter()
+                    else:
+                        logger.warning("⚠️ No se pudieron descargar grafos - usando fallback")
+                        
+                except Exception as drive_error:
+                    logger.warning(f"⚠️ Google Drive download falló: {drive_error} - usando fallback")
+            
             logger.info("✅ ChileMultiModalRouter inicializado correctamente")
+            
         except Exception as e:
             logger.error(f"❌ Error inicializando ChileMultiModalRouter: {e}")
             chile_multimodal_router = "failed"
