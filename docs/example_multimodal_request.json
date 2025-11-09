@@ -1,0 +1,77 @@
+{
+  "places": [
+    {
+      "id": "place_1",
+      "name": "Plaza de Armas",
+      "lat": -33.4372,
+      "lon": -70.6506,
+      "type": "tourist_attraction",
+      "priority": 8,
+      "min_duration_hours": 1.5,
+      "rating": 4.5,
+      "address": "Plaza de Armas, Santiago, Región Metropolitana, Chile",
+      "google_place_id": "ChIJVxWUw0XEYpYRREhj80j-jVM"
+    },
+    {
+      "id": "place_2",
+      "name": "Mercado Central",
+      "lat": -33.4333,
+      "lon": -70.6500,
+      "type": "food",
+      "priority": 7,
+      "min_duration_hours": 2.0,
+      "rating": 4.2,
+      "address": "San Pablo 967, Santiago, Región Metropolitana, Chile",
+      "google_place_id": "ChIJK_1234567890abcdef"
+    },
+    {
+      "id": "place_3",
+      "name": "Cerro San Cristóbal",
+      "lat": -33.4267,
+      "lon": -70.6333,
+      "type": "viewpoint", 
+      "priority": 9,
+      "min_duration_hours": 2.5,
+      "rating": 4.7,
+      "address": "Pío Nono 450, Recoleta, Región Metropolitana, Chile",
+      "google_place_id": "ChIJabcdef1234567890"
+    },
+    {
+      "id": "place_4",
+      "name": "Museo Nacional de Bellas Artes",
+      "lat": -33.4356,
+      "lon": -70.6394,
+      "type": "museum",
+      "priority": 6,
+      "min_duration_hours": 2.0,
+      "rating": 4.3,
+      "address": "José Miguel de la Barra 650, Santiago, Chile"
+    },
+    {
+      "id": "place_5", 
+      "name": "Barrio Bellavista",
+      "lat": -33.4278,
+      "lon": -70.6344,
+      "type": "neighborhood",
+      "priority": 8,
+      "min_duration_hours": 3.0,
+      "rating": 4.4,
+      "address": "Bellavista, Providencia, Región Metropolitana, Chile"
+    }
+  ],
+  "start_date": "2025-01-15",
+  "end_date": "2025-01-16",
+  "transport_mode": "drive",
+  "daily_start_hour": 9,
+  "daily_end_hour": 18,
+  "max_walking_distance_km": 15.0,
+  "max_daily_activities": 4,
+  "preferences": {
+    "culture_weight": 0.8,
+    "nature_weight": 0.6,
+    "food_weight": 0.9,
+    "avoid_crowds": false,
+    "prefer_morning_activities": true
+  },
+  "accommodations": []
+}

@@ -1,0 +1,211 @@
+{
+  "itinerary": [
+    {
+      "day": 1,
+      "date": "2025-01-15",
+      "activities": [
+        {
+          "place": "Plaza de Armas",
+          "start": "09:00",
+          "end": "10:30",
+          "duration_h": 1.5,
+          "lat": -33.4372,
+          "lon": -70.6506,
+          "type": "tourist_attraction",
+          "name": "Plaza de Armas",
+          "category": "attraction",
+          "priority": 8,
+          "estimated_duration": 90,
+          "coordinates": {
+            "latitude": -33.4372,
+            "longitude": -70.6506
+          }
+        },
+        {
+          "place": "Mercado Central",
+          "start": "11:00",
+          "end": "13:00",
+          "duration_h": 2.0,
+          "lat": -33.4333,
+          "lon": -70.6500,
+          "type": "food",
+          "name": "Mercado Central",
+          "category": "restaurant",
+          "priority": 7,
+          "estimated_duration": 120,
+          "coordinates": {
+            "latitude": -33.4333,
+            "longitude": -70.6500
+          }
+        },
+        {
+          "place": "Cerro San Cristóbal",
+          "start": "14:00",
+          "end": "16:30",
+          "duration_h": 2.5,
+          "lat": -33.4267,
+          "lon": -70.6333,
+          "type": "viewpoint",
+          "name": "Cerro San Cristóbal",
+          "category": "nature",
+          "priority": 9,
+          "estimated_duration": 150,
+          "coordinates": {
+            "latitude": -33.4267,
+            "longitude": -70.6333
+          }
+        }
+      ],
+      "travel_summary": {
+        "total_distance_km": 12.5,
+        "total_travel_time_minutes": 45,
+        "transport_modes": ["drive"],
+        "routes": [
+          {
+            "from": "Plaza de Armas",
+            "to": "Mercado Central",
+            "distance_km": 0.8,
+            "travel_time_minutes": 5,
+            "transport": "drive"
+          },
+          {
+            "from": "Mercado Central", 
+            "to": "Cerro San Cristóbal",
+            "distance_km": 4.2,
+            "travel_time_minutes": 15,
+            "transport": "drive"
+          }
+        ]
+      }
+    },
+    {
+      "day": 2,
+      "date": "2025-01-16",
+      "activities": [
+        {
+          "place": "Museo Nacional de Bellas Artes",
+          "start": "09:30",
+          "end": "11:30",
+          "duration_h": 2.0,
+          "lat": -33.4356,
+          "lon": -70.6394,
+          "type": "museum",
+          "name": "Museo Nacional de Bellas Artes",
+          "category": "culture",
+          "priority": 6,
+          "estimated_duration": 120,
+          "coordinates": {
+            "latitude": -33.4356,
+            "longitude": -70.6394
+          }
+        },
+        {
+          "place": "Barrio Bellavista",
+          "start": "12:00",
+          "end": "15:00",
+          "duration_h": 3.0,
+          "lat": -33.4278,
+          "lon": -70.6344,
+          "type": "neighborhood",
+          "name": "Barrio Bellavista",
+          "category": "cultural_district",
+          "priority": 8,
+          "estimated_duration": 180,
+          "coordinates": {
+            "latitude": -33.4278,
+            "longitude": -70.6344
+          }
+        }
+      ],
+      "travel_summary": {
+        "total_distance_km": 8.3,
+        "total_travel_time_minutes": 25,
+        "transport_modes": ["drive", "walk"],
+        "routes": [
+          {
+            "from": "Museo Nacional de Bellas Artes",
+            "to": "Barrio Bellavista", 
+            "distance_km": 1.2,
+            "travel_time_minutes": 8,
+            "transport": "walk"
+          }
+        ]
+      }
+    }
+  ],
+  "optimization_metrics": {
+    "total_distance_km": 45.2,
+    "total_travel_time_hours": 2.1,
+    "total_visit_time_hours": 11.0,
+    "optimization_mode": "multimodal_hybrid_v31",
+    "efficiency_score": 0.87,
+    "places_visited": 5,
+    "places_skipped": 0,
+    "days_used": 2,
+    "avg_activities_per_day": 2.5,
+    "multimodal_router_stats": {
+      "routes_calculated": 15,
+      "avg_calculation_time_ms": 180,
+      "precision_mode": "high",
+      "chile_optimized": true,
+      "rtree_available": false,
+      "fallback_mode": "linear_search"
+    },
+    "transport_analysis": {
+      "primary_mode": "drive",
+      "walking_segments": 2,
+      "driving_segments": 8,
+      "total_walking_km": 3.2,
+      "total_driving_km": 42.0
+    },
+    "timing_analysis": {
+      "earliest_start": "09:00",
+      "latest_end": "16:30", 
+      "peak_activity_hours": ["11:00-13:00", "14:00-16:00"],
+      "buffer_time_minutes": 30,
+      "lunch_break_included": true
+    }
+  },
+  "recommendations": [
+    "Itinerario optimizado usando rutas reales de Chile (ChileMultiModalRouter)",
+    "Considera reservar con anticipación en Mercado Central durante horarios peak",
+    "Cerro San Cristóbal: mejor visitarlo en días despejados para mejores vistas",
+    "Barrio Bellavista: ideal para almorzar y explorar galerías de arte",
+    "Transporte recomendado: Auto/Uber para mayor flexibilidad entre puntos",
+    "Tiempo buffer incluido para tráfico en Santiago Centro"
+  ],
+  "weather_considerations": [
+    "Actividades outdoor concentradas en horarios de menor calor",
+    "Museos y lugares cubiertos disponibles como alternativa en caso de lluvia"
+  ],
+  "budget_estimate": {
+    "transport_cost_usd": 25,
+    "entry_fees_usd": 15,
+    "food_estimate_usd": 60,
+    "total_estimated_usd": 100,
+    "currency": "USD",
+    "notes": "Precios aproximados para 2 personas"
+  },
+  "accessibility_info": {
+    "wheelchair_accessible": ["Museo Nacional de Bellas Artes", "Mercado Central"],
+    "limited_accessibility": ["Cerro San Cristóbal"],
+    "public_transport_friendly": ["Plaza de Armas", "Barrio Bellavista"]
+  },
+  "processing_metadata": {
+    "optimization_engine": "legacy_deprecated",
+    "processing_time_ms": 8500,
+    "api_version": "v3.1",
+    "timestamp": "2025-11-09T10:30:00Z",
+    "request_id": "req_1ba892ef3f580555",
+    "warnings": [
+      "Using deprecated legacy optimizer (0% benchmark success rate)",
+      "OR-Tools recommended for 15x speed improvement",
+      "R-tree spatial indexing unavailable, using linear search fallback"
+    ],
+    "performance_notes": [
+      "Response generated with legacy system",
+      "Enable OR-Tools for production use: ENABLE_ORTOOLS=true",
+      "Chile routing precision: 85% (vs 95% with optimized graphs)"
+    ]
+  }
+}

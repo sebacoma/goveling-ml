@@ -2,6 +2,7 @@ from typing import List, Dict, Optional, Any
 import logging
 import asyncio
 from utils.google_maps_client import GoogleMapsClient
+from utils.geographic_cache_manager import get_cache_manager
 from settings import settings
 
 class GooglePlacesService:
@@ -9,6 +10,12 @@ class GooglePlacesService:
         self.maps_client = GoogleMapsClient()
         self.logger = logging.getLogger(__name__)
         self.api_key = settings.GOOGLE_PLACES_API_KEY
+        self.cache_manager = get_cache_manager()
+        
+        # Estadísticas de caché
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.api_calls_saved = 0
     
     async def search_nearby(
         self, 
@@ -157,8 +164,38 @@ class GooglePlacesService:
     ) -> List[Dict[str, Any]]:
         """
         Buscar lugares reales cercanos usando Google Places API con variedad por día
+        Con caché inteligente para reducir llamadas API
         """
         try:
+            # 🎯 PASO 1: INTENTAR CACHE PRIMERO
+            place_types = self._get_types_for_day(types, day_offset)
+            cached_results = self.cache_manager.get_cached_places(
+                lat=lat, 
+                lon=lon, 
+                radius=radius_m, 
+                place_types=place_types
+            )
+            
+            if cached_results and len(cached_results) >= limit:
+                self.cache_hits += 1
+                self.api_calls_saved += len(place_types)  # Llamadas API que nos ahorramos
+                
+                self.logger.info(f"🎯 CACHE HIT: {len(cached_results)} lugares desde caché")
+                self.logger.debug(f"   💰 API calls ahorradas: {len(place_types)}")
+                
+                # Aplicar filtros post-caché
+                filtered_cached = []
+                for place in cached_results[:limit * 2]:  # Tomar más para filtrar
+                    if self._is_valid_suggestion(place, exclude_chains):
+                        filtered_cached.append(place)
+                        if len(filtered_cached) >= limit:
+                            break
+                
+                return filtered_cached[:limit]
+            
+            # 🔄 PASO 2: SI NO HAY CACHE VÁLIDO, USAR API
+            self.cache_misses += 1
+            
             if not self.api_key:
                 self.logger.warning("🔑 No hay API key de Google Places - sin sugerencias (solo lugares de alta calidad)")
                 return []  # Sin API key no podemos validar calidad, así que no devolvemos nada
@@ -224,7 +261,17 @@ class GooglePlacesService:
                 self.logger.info("🚫 Sin lugares que cumplan estándares de calidad (4.5⭐, 20+ reseñas)")
                 return []
             
+            # 🎯 PASO 3: CACHEAR RESULTADOS PARA FUTURAS BÚSQUEDAS
+            self.cache_manager.cache_places(
+                lat=lat,
+                lon=lon, 
+                radius=radius_m,
+                place_types=place_types,
+                places_data=final_places
+            )
+            
             self.logger.info(f"✅ Retornando {len(final_places)} sugerencias (🏛️ {len([p for p in final_places if p.get('type') == 'tourist_attraction'])} atracciones)")
+            self.logger.debug(f"💾 Resultados cacheados para futuras búsquedas")
             return final_places[:limit]
             
         except Exception as e:
@@ -508,6 +555,34 @@ class GooglePlacesService:
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
         
         return R * c
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Obtener estadísticas de uso del caché"""
+        cache_stats = self.cache_manager.get_cache_stats()
+        
+        total_requests = self.cache_hits + self.cache_misses
+        hit_rate = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        estimated_cost_saved = self.api_calls_saved * 0.032  # $0.032 per API call
+        
+        return {
+            'cache_performance': {
+                'hits': self.cache_hits,
+                'misses': self.cache_misses,
+                'hit_rate_percentage': round(hit_rate, 2),
+                'api_calls_saved': self.api_calls_saved,
+                'estimated_cost_saved_usd': round(estimated_cost_saved, 3)
+            },
+            'cache_storage': cache_stats
+        }
+    
+    def reset_stats(self) -> None:
+        """Resetear estadísticas de caché"""
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.api_calls_saved = 0
+        self.logger.info("📊 Estadísticas de caché reseteadas")
+        
         """
         Busca lugares cercanos usando Google Places API.
         

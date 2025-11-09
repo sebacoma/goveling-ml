@@ -722,6 +722,55 @@ async def get_semantic_mode():
         "timestamp": datetime.now().isoformat()
     }
 
+@app.get("/cache/stats", tags=["Cache Management"])
+async def get_cache_stats():
+    """Obtener estadísticas del sistema de caché geográfico"""
+    try:
+        from services.google_places_service import GooglePlacesService
+        places_service = GooglePlacesService()
+        
+        stats = places_service.get_cache_stats()
+        
+        return {
+            "success": True,
+            "cache_stats": stats,
+            "recommendations": [
+                f"Hit rate actual: {stats['cache_performance']['hit_rate_percentage']}%",
+                f"Costo ahorrado: ${stats['cache_performance']['estimated_cost_saved_usd']:.3f} USD",
+                "80-90% de reducción esperada con uso continuo"
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo stats de caché: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "cache_stats": None
+        }
+
+@app.post("/cache/clear", tags=["Cache Management"])
+async def clear_cache(older_than_hours: float = 24.0):
+    """Limpiar caché manualmente"""
+    try:
+        from utils.geographic_cache_manager import get_cache_manager
+        cache_manager = get_cache_manager()
+        
+        cleared_count = cache_manager.clear_cache(older_than_hours=older_than_hours)
+        
+        return {
+            "success": True,
+            "cleared_entries": cleared_count,
+            "message": f"Limpiadas {cleared_count} entradas > {older_than_hours}h"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error limpiando caché: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 @app.get("/debug/suggestions")
 async def debug_suggestions(lat: float = -23.6521, lon: float = -70.3958, day: int = 1):
     """Debug endpoint para probar sugerencias"""
