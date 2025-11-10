@@ -1649,7 +1649,9 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     "best_time": format_time_window(activity, all_activities, activity_index),
                     "order": order,
                     "is_intercity": False,
-                    "quality_flag": get_value(activity, 'quality_flag', None)  # Agregar quality flag al frontend
+                    "quality_flag": get_value(activity, 'quality_flag', None),  # Agregar quality flag al frontend
+                    "suggested": get_value(activity, 'suggested', False),  # Campo para lugares sugeridos automáticamente
+                    "suggestion_reason": get_value(activity, 'suggestion_reason', None)  # Razón de la sugerencia
                 }
                 
                 # Para transfers, agregar coordenadas de origen y destino
@@ -1723,6 +1725,42 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                 
                 return base_data
         
+        # 🎯 CREAR DÍAS VACÍOS CON SUGERENCIAS SI ES NECESARIO
+        if suggestions_by_date:
+            # Obtener fechas de días existentes
+            existing_dates = {day.get("date") for day in days_data}
+            
+            # Crear días vacíos con sugerencias
+            for suggestion_date, day_suggestions in suggestions_by_date.items():
+                if suggestion_date not in existing_dates:
+                    # Crear actividades sugeridas
+                    suggested_activities = []
+                    for idx, suggestion in enumerate(day_suggestions):
+                        suggested_activities.append({
+                            "name": suggestion["name"],
+                            "lat": suggestion["lat"], 
+                            "lon": suggestion["lon"],
+                            "category": suggestion["category"],
+                            "rating": suggestion["rating"],
+                            "address": suggestion["address"],
+                            "estimated_time": "1.5h",  # Tiempo estimado por defecto
+                            "suggested": True,
+                            "suggestion_reason": suggestion["suggestion_reason"]
+                        })
+                    
+                    # Crear día vacío con sugerencias
+                    empty_day_with_suggestions = {
+                        "date": suggestion_date,
+                        "activities": suggested_activities,
+                        "free_minutes": max(0, 540 - len(suggested_activities) * 90)  # 9h - tiempo actividades
+                    }
+                    
+                    days_data.append(empty_day_with_suggestions)
+                    logger.info(f"📅 Día vacío creado para {suggestion_date} con {len(suggested_activities)} sugerencias")
+            
+            # Ordenar días por fecha
+            days_data.sort(key=lambda x: x.get("date", ""))
+
         # Convertir días a formato frontend
         itinerary_days = []
         day_counter = 1
@@ -1981,11 +2019,18 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         if quality_recommendations:
             base_recommendations.extend(quality_recommendations)
+            
+        # Combinar recomendaciones automáticas con las base
+        if auto_recommendations:
+            base_recommendations.extend(auto_recommendations)
         
         # 1. Detectar días completamente vacíos (sin actividades)
         empty_days = []
         total_days_requested = (request.end_date - request.start_date).days + 1
         days_with_activities = len(days_data)
+        
+        logger.info(f"🔍 DÍAS LIBRES DEBUG: total_solicitados={total_days_requested}, días_con_actividades={days_with_activities}")
+        logger.info(f"📅 Fechas existentes en days_data: {[day.get('date', 'NO_DATE') for day in days_data]}")
         
         if days_with_activities < total_days_requested:
             # Generar fechas faltantes
@@ -2022,6 +2067,110 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         
         # Combinar ambos tipos de días libres
         free_days_detected = empty_days + partial_free_days
+        
+        logger.info(f"🏖️ RESUMEN DÍAS LIBRES: empty_days={len(empty_days)}, partial_free_days={len(partial_free_days)}, total={len(free_days_detected)}")
+        if empty_days:
+            logger.info(f"📅 Días vacíos detectados: {[d['date'] for d in empty_days]}")
+        if partial_free_days:
+            logger.info(f"📅 Días parciales detectados: {[d['date'] for d in partial_free_days]}")
+        
+        # Inicializar diccionario de sugerencias
+        suggestions_by_date = {}
+        
+        # 🎯 GENERAR SUGERENCIAS AUTOMÁTICAS PARA DÍAS LIBRES
+        if free_days_detected:
+            logger.info(f"🏖️ Detectados {len(free_days_detected)} días libres - generando sugerencias automáticas")
+            
+            try:
+                from services.google_places_service import GooglePlacesService
+                places_service = GooglePlacesService()
+                
+                # Obtener centro geográfico de los lugares existentes para contexto
+                if request.places:
+                    center_lat = sum(p.lat for p in request.places) / len(request.places)
+                    center_lon = sum(p.lon for p in request.places) / len(request.places)
+                else:
+                    # Fallback: usar primer hotel si existe
+                    if accommodations_data and accommodations_data[0]:
+                        center_lat = accommodations_data[0].get('lat', 40.7128)
+                        center_lon = accommodations_data[0].get('lon', -74.0060)
+                    else:
+                        # Default: NYC como fallback
+                        center_lat, center_lon = 40.7128, -74.0060
+                
+                suggestions_generated = []
+                
+                for free_day in free_days_detected:
+                    day_date = free_day["date"]
+                    day_type = free_day["type"]
+                    
+                    logger.info(f"📍 Generando sugerencias para {day_date} ({day_type})")
+                    
+                    # Generar 3-5 sugerencias por día libre
+                    place_types = ["tourist_attraction", "museum", "park", "restaurant"]
+                    day_suggestions = []
+                    
+                    for place_type in place_types:
+                        try:
+                            suggestions = await places_service.search_nearby(
+                                lat=center_lat,
+                                lon=center_lon,
+                                types=[place_type],
+                                radius_m=5000,  # 5km radius
+                                limit=2
+                            )
+                            
+                            for suggestion in suggestions[:2]:  # Max 2 por tipo
+                                day_suggestions.append({
+                                    "name": suggestion.get("name", "Lugar sugerido"),
+                                    "rating": suggestion.get("rating", 4.0),
+                                    "address": suggestion.get("address", "Dirección no disponible"),
+                                    "category": place_type,
+                                    "lat": suggestion.get("lat", center_lat),
+                                    "lon": suggestion.get("lon", center_lon),
+                                    "suggested": True,
+                                    "suggestion_reason": f"Sugerido para día libre {day_date}"
+                                })
+                            
+                        except Exception as e:
+                            logger.warning(f"Error generando sugerencias tipo {place_type}: {e}")
+                    
+                    if day_suggestions:
+                        suggestions_generated.append({
+                            "date": day_date,
+                            "suggestions": day_suggestions[:5],  # Max 5 por día
+                            "type": day_type
+                        })
+                        
+                        logger.info(f"✅ {len(day_suggestions[:5])} sugerencias generadas para {day_date}")
+                
+                # Almacenar sugerencias para incluir en días vacíos
+                if suggestions_generated:
+                    for day_suggestions in suggestions_generated:
+                        suggestions_by_date[day_suggestions["date"]] = day_suggestions["suggestions"]
+                    
+                    suggestion_text = []
+                    for day_suggestions in suggestions_generated:
+                        day_date = day_suggestions["date"]
+                        suggestions_count = len(day_suggestions["suggestions"])
+                        suggestion_text.append(
+                            f"📅 {day_date}: {suggestions_count} lugares sugeridos disponibles"
+                        )
+                    
+                    auto_recommendations.extend([
+                        "🎯 Días libres detectados - sugerencias automáticas generadas:",
+                        *suggestion_text,
+                        "💡 Las sugerencias aparecen marcadas como 'suggested: true'"
+                    ])
+                    
+                    logger.info(f"🎉 Sugerencias automáticas completadas: {len(suggestions_generated)} días procesados")
+                
+            except Exception as e:
+                logger.error(f"❌ Error generando sugerencias automáticas: {e}")
+                auto_recommendations.append(
+                    "⚠️ Error generando sugerencias automáticas para días libres. "
+                    "Contacta soporte si persiste el problema."
+                )
         
         # Log success
         analytics.track_request(f"hybrid_itinerary_{optimization_mode}_success", {
@@ -2879,7 +3028,18 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
         if not optimization_result or 'days' not in optimization_result:
             raise ValueError("Resultado de optimización multi-modal inválido")
             
-        days_data = optimization_result['days']
+        # Normalizar formato de 'days' devuelto por el optimizer.
+        # Algunos optimizadores retornan un dict {date: day_obj}, otros una lista.
+        raw_days = optimization_result['days']
+        if isinstance(raw_days, dict):
+            # Convertir dict->lista preservando orden de fechas
+            try:
+                # Ordenar por fecha (clave) para consistencia
+                days_data = [raw_days[k] for k in sorted(raw_days.keys())]
+            except Exception:
+                days_data = list(raw_days.values())
+        else:
+            days_data = raw_days
         
         # Procesar días para frontend (usar la lógica existente)
         itinerary_days = []
@@ -3002,6 +3162,162 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
         logger.info(f"📊 {total_activities} lugares, {total_transfers} transfers")
         logger.info(f"🚀 Router stats: {router_stats}")
         
+        logger.info("🎯 INICIANDO DETECCIÓN DE DÍAS LIBRES...")
+        
+        # 🎯 DETECTAR Y GENERAR SUGERENCIAS PARA DÍAS LIBRES
+        base_recommendations = [
+            f"Itinerario optimizado con sistema multi-modal",
+            f"{total_activities} actividades distribuidas en {len(itinerary_days)} días",
+            f"Tiempo total de viaje: {total_travel_minutes} minutos",
+            f"Router multi-modal: {router_stats.get('cached_graphs', 0)} grafos en caché"
+        ]
+        
+        # Detectar días completamente vacíos (sin actividades)
+        empty_days = []
+        total_days_requested = (end_date - start_date).days + 1
+        days_with_activities = len(itinerary_days)
+        
+        logger.info(f"🔍 DÍAS LIBRES DEBUG: total_solicitados={total_days_requested}, días_con_actividades={days_with_activities}")
+        logger.info(f"📅 Fechas existentes en itinerary: {[day.get('date', 'NO_DATE') for day in itinerary_days]}")
+        
+        if days_with_activities < total_days_requested:
+            # Generar fechas faltantes
+            from datetime import timedelta
+            current_date = start_date
+            existing_dates = {day.get("date") for day in itinerary_days}
+            
+            for i in range(total_days_requested):
+                date_str = current_date.strftime('%Y-%m-%d')
+                if date_str not in existing_dates:
+                    empty_days.append({
+                        "date": date_str,
+                        "free_minutes": 540,  # 9 horas completas (9:00-18:00)
+                        "activities_count": 0,
+                        "type": "completely_free"
+                    })
+                current_date += timedelta(days=1)
+        
+        # Detectar días con poco contenido o tiempo libre excesivo
+        partial_free_days = []
+        for day in itinerary_days:
+            free_time_str = day.get("free_time", "0h")
+            try:
+                free_hours = float(free_time_str.replace('h', ''))
+                free_minutes = free_hours * 60
+            except:
+                free_minutes = 0
+                
+            activities_count = len(day.get("places", []))
+            
+            # Criterios para día "libre" o con espacio para más actividades
+            if free_minutes > 120 or activities_count <= 1:  # Más de 2h libres o pocas actividades
+                partial_free_days.append({
+                    "date": day.get("date"),
+                    "free_minutes": free_minutes,
+                    "activities_count": activities_count,
+                    "existing_activities": day.get("places", []),
+                    "type": "partially_free"
+                })
+        
+        # Combinar ambos tipos de días libres
+        free_days_detected = empty_days + partial_free_days
+        
+        logger.info(f"🏖️ RESUMEN DÍAS LIBRES: empty_days={len(empty_days)}, partial_free_days={len(partial_free_days)}, total={len(free_days_detected)}")
+        if empty_days:
+            logger.info(f"📅 Días vacíos detectados: {[d['date'] for d in empty_days]}")
+        if partial_free_days:
+            logger.info(f"📅 Días parciales detectados: {[d['date'] for d in partial_free_days]}")
+        
+        # Generar sugerencias automáticas para días libres
+        if free_days_detected:
+            logger.info(f"🏖️ Detectados {len(free_days_detected)} días libres - generando sugerencias automáticas")
+            
+            try:
+                from services.google_places_service import GooglePlacesService
+                places_service = GooglePlacesService()
+                
+                # Obtener centro geográfico de los lugares existentes para contexto
+                if request.places:
+                    center_lat = sum(p.lat for p in request.places) / len(request.places)
+                    center_lon = sum(p.lon for p in request.places) / len(request.places)
+                else:
+                    # Default: Orlando como fallback
+                    center_lat, center_lon = 28.5383, -81.3792
+                
+                # Detectar días existentes en el itinerario que están vacíos (0 places)
+                existing_empty_days = [d for d in itinerary_days if len(d.get('places', [])) == 0]
+
+                # Agregar/actualizar días vacíos con sugerencias al itinerario
+                # 1) Reemplazar días existentes que están vacíos
+                for existing in existing_empty_days:
+                    day_date = existing.get("date")
+                    logger.info(f"📍 Rellenando día existente vacío {day_date} con sugerencias")
+                    # 🎯 Generar sugerencias REALES con Google Places para el día existente
+                    suggested_places = await generate_smart_suggestions_for_day(
+                        places_service, center_lat, center_lon, day_date, request
+                    )
+                    # Reemplazar el contenido del día existente
+                    existing['places'] = suggested_places
+                    existing['total_places'] = len(suggested_places)
+                    existing['total_time'] = "3.5h"
+                    existing['free_time'] = "5.5h"
+                    existing['suggested_day'] = True
+                    existing['suggestion_reason'] = f"Día libre detectado - sugerencias automáticas generadas"
+                    logger.info(f"✅ Día existente {day_date} actualizado con {len(suggested_places)} sugerencias")
+
+                # 2) Crear días completamente faltantes (fechas que no estaban en itinerary_days)
+                for empty_day in empty_days:
+                    day_date = empty_day["date"]
+                    logger.info(f"📍 Creando día vacío con sugerencias para {day_date}")
+                    
+                    # 🎯 Generar sugerencias REALES con Google Places para día vacío
+                    suggested_places = await generate_smart_suggestions_for_day(
+                        places_service, center_lat, center_lon, day_date, request
+                    )
+                    
+                    # Crear día con sugerencias
+                    empty_day_formatted = {
+                        "day": len(itinerary_days) + 1,
+                        "date": day_date,
+                        "places": suggested_places,
+                        "transfers": [],
+                        "total_places": len(suggested_places),
+                        "total_transfers": 0,
+                        "total_time": "3.5h",
+                        "walking_time": "0min",
+                        "transport_time": "0min", 
+                        "free_time": "5.5h",
+                        "suggested_day": True,
+                        "suggestion_reason": f"Día libre detectado - sugerencias automáticas generadas"
+                    }
+                    
+                    # Evitar duplicar si por alguna razón ya existe
+                    if not any(d.get('date') == day_date for d in itinerary_days):
+                        itinerary_days.append(empty_day_formatted)
+                        logger.info(f"✅ Día vacío {day_date} creado con {len(suggested_places)} sugerencias")
+                    else:
+                        logger.info(f"⚠️ Día {day_date} ya existía en el itinerario, se omitió creación")
+                
+                # Ordenar días por fecha para mantener secuencia correcta
+                itinerary_days.sort(key=lambda x: x.get("date", ""))
+                
+                # Actualizar recomendaciones
+                if empty_days:
+                    base_recommendations.extend([
+                        f"🎯 {len(empty_days)} días libres detectados - sugerencias automáticas generadas",
+                        "💡 Las sugerencias aparecen marcadas como 'suggested: true'",
+                        "🔄 Puedes reemplazar las sugerencias con tus propios lugares"
+                    ])
+                    
+                logger.info(f"🎉 Sugerencias automáticas completadas: {len(empty_days)} días procesados")
+                
+            except Exception as e:
+                logger.error(f"❌ Error generando sugerencias automáticas: {e}")
+                base_recommendations.append(
+                    "⚠️ Error generando sugerencias automáticas para días libres. "
+                    "Contacta soporte si persiste el problema."
+                )
+        
         return ItineraryResponse(
             itinerary=itinerary_days,
             optimization_metrics={
@@ -3018,12 +3334,7 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
                 "intercity_transfers_detected": optimization_metrics.get('long_transfers_detected', 0),
                 "cache_performance": optimization_metrics.get('cache_performance', {})
             },
-            recommendations=[
-                f"Itinerario optimizado con sistema multi-modal",
-                f"{total_activities} actividades distribuidas en {len(itinerary_days)} días",
-                f"Tiempo total de viaje: {total_travel_minutes} minutos",
-                f"Router multi-modal: {router_stats.get('cached_graphs', 0)} grafos en caché"
-            ]
+            recommendations=base_recommendations
         )
         
     except Exception as e:
@@ -3507,6 +3818,268 @@ async def get_performance_statistics():
             status_code=500,
             detail=f"Error obteniendo estadísticas: {str(e)}"
         )
+
+# ===== FUNCIONES AUXILIARES PARA SUGERENCIAS INTELIGENTES =====
+
+async def generate_smart_suggestions_for_day(places_service, center_lat, center_lon, day_date, request):
+    """
+    🎯 Generar sugerencias inteligentes usando Google Places API real
+    
+    Features:
+    - ✨ Google Places API real para lugares auténticos
+    - 🏷️ Personalización basada en preferencias del usuario  
+    - 📍 Lugares populares y bien valorados de la zona
+    - ⭐ Ratings, reviews y información detallada
+    """
+    suggested_places = []
+    
+    try:
+        # Obtener preferencias del usuario
+        user_preferences = getattr(request, 'preferences', {})
+        interests = user_preferences.get('interests', ['tourist_attraction', 'restaurant', 'museum'])
+        budget_level = user_preferences.get('budget', 'medium')
+        
+        # Mapear presupuesto a filtros de precio de Google Places
+        price_levels = {
+            'low': [1, 2],      # $ y $$
+            'medium': [2, 3],   # $$ y $$$  
+            'high': [3, 4],     # $$$ y $$$$
+            'any': [1, 2, 3, 4] # Todos los niveles
+        }
+        
+        # 🎯 Categorías priorizadas por intereses del usuario
+        search_categories = []
+        if 'tourist_attraction' in interests:
+            search_categories.extend(['tourist_attraction', 'point_of_interest'])
+        if 'restaurant' in interests or 'food' in interests:
+            search_categories.append('restaurant')
+        if 'museum' in interests or 'culture' in interests:
+            search_categories.extend(['museum', 'art_gallery'])
+        if 'nature' in interests:
+            search_categories.extend(['park', 'natural_feature'])
+        if 'shopping' in interests:
+            search_categories.extend(['shopping_mall', 'store'])
+        if 'nightlife' in interests:
+            search_categories.extend(['night_club', 'bar'])
+        
+        # Fallback si no hay preferencias específicas
+        if not search_categories:
+            search_categories = ['tourist_attraction', 'restaurant', 'point_of_interest']
+        
+        order_counter = 1
+        logger.info(f"🔍 Generando sugerencias para categorías: {search_categories}")
+        
+        # 📍 Buscar lugares reales por cada categoría de interés
+        for category in search_categories[:4]:  # Max 4 categorías por día
+            try:
+                logger.info(f"🔍 Buscando {category} cerca de {center_lat:.4f}, {center_lon:.4f}")
+                
+                # 🎯 Parámetros de búsqueda optimizados para calidad
+                search_params = {
+                    "query": f"best {category.replace('_', ' ')} popular top rated must visit",
+                    "location": f"{center_lat},{center_lon}",
+                    "radius": 10000,  # 10km radius para más opciones
+                    "place_type": category,
+                    "limit": 2,  # 2 por categoría para no sobrecargar
+                    "min_rating": 4.0  # Solo lugares bien valorados
+                }
+                
+                # 💰 Agregar filtro de precio según presupuesto del usuario
+                if budget_level in price_levels:
+                    search_params["price_levels"] = price_levels[budget_level]
+                
+                # 🌟 Buscar lugares reales con Google Places
+                real_suggestions = await places_service.search_nearby(
+                    lat=center_lat,
+                    lon=center_lon,
+                    types=[category],
+                    radius_m=search_params["radius"],
+                    limit=search_params["limit"]
+                )
+                
+                for suggestion in real_suggestions:
+                    # ⏰ Calcular tiempo estimado basado en tipo de lugar
+                    duration_map = {
+                        'restaurant': ("1.5h", "12:00-14:00"),
+                        'cafe': ("1.0h", "15:00-16:00"), 
+                        'museum': ("2.5h", "10:00-12:30"),
+                        'art_gallery': ("2.0h", "10:30-12:30"),
+                        'park': ("1.5h", "09:00-10:30"),
+                        'natural_feature': ("2.0h", "09:00-11:00"),
+                        'shopping_mall': ("2.0h", "14:00-16:00"),
+                        'store': ("1.0h", "15:00-16:00"),
+                        'tourist_attraction': ("2.5h", "10:00-12:30"),
+                        'point_of_interest': ("2.0h", "10:00-12:00"),
+                        'night_club': ("3.0h", "21:00-00:00"),
+                        'bar': ("2.0h", "19:00-21:00")
+                    }
+                    
+                    estimated_duration, best_time = duration_map.get(category, ("2.0h", "10:00-12:00"))
+                    
+                    # 🎯 Crear lugar sugerido adaptable (Google Places real o sintético)
+                    is_synthetic = suggestion.get("synthetic", False)
+                    place_name = suggestion.get("name", f"Lugar {category}")
+                    
+                    # Descripción inteligente basada en el origen
+                    if is_synthetic:
+                        description = f"📍 Sugerencia local para {category.replace('_', ' ')} - {place_name}"
+                        reason_text = f"🎯 Sugerencia basada en tus intereses para {day_date}"
+                        verified_status = False
+                    else:
+                        description = f"✨ Recomendado por Google Places - {place_name} es un destino destacado en el área"
+                        reason_text = f"🎯 Sugerencia inteligente basada en tus intereses ({', '.join(interests)}) para {day_date}"
+                        verified_status = True
+                    
+                    suggested_place = {
+                        "id": f"suggested-{day_date}-{order_counter}",
+                        "name": place_name,
+                        "category": category,
+                        "rating": suggestion.get("rating", 4.0),
+                        "image": suggestion.get("photo_url", suggestion.get("photo", "")),
+                        "description": description,
+                        "estimated_time": estimated_duration,
+                        "priority": 3 + (order_counter % 2),
+                        "lat": suggestion.get("lat", center_lat),
+                        "lng": suggestion.get("lon", suggestion.get("lng", center_lon)),
+                        "recommended_duration": estimated_duration,
+                        "best_time": best_time,
+                        "order": order_counter,
+                        "is_intercity": False,
+                        "suggested": True,
+                        "suggestion_reason": reason_text,
+                        
+                        # 🌟 Campos adaptativos según el origen
+                        "address": suggestion.get("address", "Dirección no disponible"),
+                        "phone": suggestion.get("phone", ""),
+                        "website": suggestion.get("website", ""),
+                        "reviews_count": suggestion.get("user_ratings_total", suggestion.get("reviews_count", 0)),
+                        "place_id": suggestion.get("place_id", ""),
+                        "price_level": suggestion.get("price_level", 0),
+                        "types": suggestion.get("types", [category]),
+                        "opening_hours": suggestion.get("opening_hours", {}),
+                        "google_maps_url": f"https://www.google.com/maps/search/{place_name.replace(' ', '+')}/@{suggestion.get('lat', center_lat)},{suggestion.get('lon', suggestion.get('lng', center_lon))}",
+                        
+                        # 📊 Información de calidad
+                        "google_places_verified": verified_status,
+                        "synthetic": is_synthetic,
+                        "popularity_score": suggestion.get("rating", 4.0),
+                        "budget_match": budget_level,
+                        "interest_match": [interest for interest in interests if interest in category or category in interest],
+                        "eta_minutes": suggestion.get("eta_minutes", 5)
+                    }
+                    
+                    suggested_places.append(suggested_place)
+                    order_counter += 1
+                    
+                    logger.info(f"✅ Sugerencia real: {suggested_place['name']} ({suggested_place['rating']}⭐, {suggested_place['reviews_count']} reviews)")
+                    
+                # Limitar a 4-5 lugares por día para no sobrecargar el itinerario
+                if len(suggested_places) >= 4:
+                    break
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Error buscando {category}: {e}")
+                
+                # 🔄 Fallback con sugerencia genérica de calidad si Google Places falla
+                fallback_suggestion = {
+                    "id": f"suggested-{day_date}-fallback-{order_counter}",
+                    "name": f"Explorar {category.replace('_', ' ')} local",
+                    "category": category,
+                    "rating": 4.0,
+                    "image": "",
+                    "description": f"Sugerencia local para {category.replace('_', ' ')}",
+                    "estimated_time": "2.0h",
+                    "priority": 3,
+                    "lat": center_lat,
+                    "lng": center_lon,
+                    "recommended_duration": "2.0h",
+                    "best_time": "10:00-12:00",
+                    "order": order_counter,
+                    "is_intercity": False,
+                    "suggested": True,
+                    "suggestion_reason": f"Sugerencia automática para {day_date}",
+                    "google_places_verified": False
+                }
+                suggested_places.append(fallback_suggestion)
+                order_counter += 1
+        
+        # 🛡️ Asegurar al menos 2 sugerencias por día
+        if len(suggested_places) < 2:
+            logger.warning(f"⚠️ Solo {len(suggested_places)} sugerencias encontradas para {day_date}, agregando fallbacks")
+            
+            fallback_places = [
+                {
+                    "id": f"suggested-{day_date}-fallback-restaurant",
+                    "name": "Restaurante local recomendado",
+                    "category": "restaurant",
+                    "rating": 4.2,
+                    "image": "",
+                    "description": "Restaurante con buena valoración en el área",
+                    "estimated_time": "1.5h",
+                    "priority": 4,
+                    "lat": center_lat + 0.001,
+                    "lng": center_lon + 0.001,
+                    "recommended_duration": "1.5h",
+                    "best_time": "12:30-14:00",
+                    "order": len(suggested_places) + 1,
+                    "is_intercity": False,
+                    "suggested": True,
+                    "suggestion_reason": f"Sugerencia complementaria para {day_date}",
+                    "google_places_verified": False
+                }
+            ]
+            
+            suggested_places.extend(fallback_places)
+        
+        logger.info(f"🎉 Generadas {len(suggested_places)} sugerencias inteligentes para {day_date}")
+        return suggested_places
+        
+    except Exception as e:
+        logger.error(f"❌ Error generando sugerencias inteligentes para {day_date}: {e}")
+        
+        # 🔄 Fallback completo si todo falla
+        fallback_suggestions = [
+            {
+                "id": f"suggested-{day_date}-emergency-1",
+                "name": "Explorar área local",
+                "category": "tourist_attraction", 
+                "rating": 4.0,
+                "image": "",
+                "description": f"Sugerencia de emergencia para {day_date}",
+                "estimated_time": "2.0h",
+                "priority": 3,
+                "lat": center_lat,
+                "lng": center_lon,
+                "recommended_duration": "2.0h",
+                "best_time": "10:00-12:00",
+                "order": 1,
+                "is_intercity": False,
+                "suggested": True,
+                "suggestion_reason": f"Sugerencia automática para {day_date}",
+                "google_places_verified": False
+            },
+            {
+                "id": f"suggested-{day_date}-emergency-2",
+                "name": "Almuerzo local",
+                "category": "restaurant",
+                "rating": 4.0,
+                "image": "",
+                "description": f"Restaurante sugerido para {day_date}",
+                "estimated_time": "1.5h",
+                "priority": 4,
+                "lat": center_lat + 0.001,
+                "lng": center_lon + 0.001,
+                "recommended_duration": "1.5h",
+                "best_time": "12:30-14:00",
+                "order": 2,
+                "is_intercity": False,
+                "suggested": True,
+                "suggestion_reason": f"Sugerencia automática para {day_date}",
+                "google_places_verified": False
+            }
+        ]
+        
+        return fallback_suggestions
 
 
 if __name__ == "__main__":

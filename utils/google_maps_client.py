@@ -466,3 +466,112 @@ class GoogleMapsClient:
             'origins': origins,
             'destinations': destinations
         }
+    
+    @cache_google_api(ttl=1800)  # 30 minutos de caché
+    async def search_nearby_places(self, lat: float, lon: float, types: List[str], radius_m: int = 3000, limit: int = 3) -> List[Dict]:
+        """
+        🔍 Buscar lugares cercanos usando Google Places API
+        
+        Args:
+            lat: Latitud del punto central
+            lon: Longitud del punto central 
+            types: Lista de tipos de lugares (e.g., ['restaurant', 'tourist_attraction'])
+            radius_m: Radio de búsqueda en metros
+            limit: Número máximo de lugares a devolver
+        
+        Returns:
+            Lista de lugares con información detallada
+        """
+        if not self.api_key:
+            logging.warning("🔑 Google Maps API key no configurada")
+            return []
+        
+        try:
+            # Usar Places API Nearby Search
+            nearby_url = f"{self.base_url}/place/nearbysearch/json"
+            
+            all_places = []
+            
+            # Buscar por cada tipo de lugar para obtener mejor diversidad
+            for place_type in types:
+                params = {
+                    'key': self.api_key,
+                    'location': f"{lat},{lon}",
+                    'radius': min(radius_m, 50000),  # Máximo 50km según Google Places API
+                    'type': place_type,
+                    'language': 'es',  # Resultados en español
+                }
+                
+                if not self.session:
+                    self.session = aiohttp.ClientSession()
+                
+                async with self.session.get(nearby_url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if data.get('status') == 'OK':
+                            places = data.get('results', [])
+                            
+                            for place in places[:2]:  # Max 2 por tipo para diversidad
+                                place_info = {
+                                    'name': place.get('name', 'Lugar sin nombre'),
+                                    'lat': place['geometry']['location']['lat'],
+                                    'lon': place['geometry']['location']['lng'],
+                                    'rating': place.get('rating', 4.0),
+                                    'user_ratings_total': place.get('user_ratings_total', 0),
+                                    'price_level': place.get('price_level', 0),
+                                    'types': place.get('types', []),
+                                    'place_id': place.get('place_id', ''),
+                                    'vicinity': place.get('vicinity', ''),
+                                    'address': place.get('vicinity', 'Dirección no disponible'),
+                                    'photo_reference': None,
+                                    'photo_url': '',
+                                    'opening_hours': {},
+                                    'website': '',
+                                    'phone': '',
+                                    'description': f"Lugar encontrado en Google Places con {place.get('rating', 4.0)}⭐ de rating",
+                                    'synthetic': False,
+                                    'google_places_verified': True
+                                }
+                                
+                                # Agregar foto si está disponible
+                                if 'photos' in place and len(place['photos']) > 0:
+                                    photo_ref = place['photos'][0].get('photo_reference')
+                                    if photo_ref:
+                                        place_info['photo_reference'] = photo_ref
+                                        place_info['photo_url'] = f"{self.base_url}/place/photo?photoreference={photo_ref}&sensor=false&maxheight=400&key={self.api_key}"
+                                
+                                # Información de horarios si está disponible
+                                if 'opening_hours' in place:
+                                    place_info['opening_hours'] = {
+                                        'open_now': place['opening_hours'].get('open_now', True),
+                                        'periods': place['opening_hours'].get('periods', [])
+                                    }
+                                
+                                all_places.append(place_info)
+                                
+                                # Limitar total de lugares
+                                if len(all_places) >= limit:
+                                    break
+                            
+                            logging.info(f"✅ Google Places: {len(places)} lugares encontrados para {place_type}")
+                        
+                        elif data.get('status') == 'ZERO_RESULTS':
+                            logging.info(f"🔍 Google Places: Sin resultados para {place_type} en {lat:.4f},{lon:.4f}")
+                        
+                        else:
+                            logging.warning(f"⚠️ Google Places API error: {data.get('status')} - {data.get('error_message', 'Sin mensaje')}")
+                    
+                    else:
+                        logging.error(f"❌ Error HTTP {response.status} consultando Google Places API")
+                
+                # Si ya tenemos suficientes lugares, salir del loop
+                if len(all_places) >= limit:
+                    break
+            
+            logging.info(f"🎯 Google Places: Total {len(all_places)} lugares reales encontrados")
+            return all_places[:limit]
+            
+        except Exception as e:
+            logging.error(f"💥 Error en search_nearby_places: {e}")
+            return []
