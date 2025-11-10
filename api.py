@@ -3870,7 +3870,7 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
         logger.info(f"🔍 Generando sugerencias para categorías: {search_categories}")
         
         # 📍 Buscar lugares reales por cada categoría de interés
-        for category in search_categories[:4]:  # Max 4 categorías por día
+        for category in search_categories[:3]:  # Max 3 categorías por día (limitado)
             try:
                 logger.info(f"🔍 Buscando {category} cerca de {center_lat:.4f}, {center_lon:.4f}")
                 
@@ -3880,7 +3880,7 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                     "location": f"{center_lat},{center_lon}",
                     "radius": 10000,  # 10km radius para más opciones
                     "place_type": category,
-                    "limit": 2,  # 2 por categoría para no sobrecargar
+                    "limit": 1,  # Solo 1 por categoría para no sobrecargar
                     "min_rating": 4.0  # Solo lugares bien valorados
                 }
                 
@@ -3973,8 +3973,8 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                     
                     logger.info(f"✅ Sugerencia real: {suggested_place['name']} ({suggested_place['rating']}⭐, {suggested_place['reviews_count']} reviews)")
                     
-                # Limitar a 4-5 lugares por día para no sobrecargar el itinerario
-                if len(suggested_places) >= 4:
+                # Limitar a 3 lugares por día para no sobrecargar el itinerario
+                if len(suggested_places) >= 3:
                     break
                     
             except Exception as e:
@@ -4003,33 +4003,38 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                 suggested_places.append(fallback_suggestion)
                 order_counter += 1
         
-        # 🛡️ Asegurar al menos 2 sugerencias por día
-        if len(suggested_places) < 2:
-            logger.warning(f"⚠️ Solo {len(suggested_places)} sugerencias encontradas para {day_date}, agregando fallbacks")
+        # 🛡️ Asegurar exactamente 3 sugerencias por día
+        while len(suggested_places) < 3:
+            logger.warning(f"⚠️ Solo {len(suggested_places)} sugerencias encontradas para {day_date}, agregando fallback")
             
-            fallback_places = [
-                {
-                    "id": f"suggested-{day_date}-fallback-restaurant",
-                    "name": "Restaurante local recomendado",
-                    "category": "restaurant",
-                    "rating": 4.2,
-                    "image": "",
-                    "description": "Restaurante con buena valoración en el área",
-                    "estimated_time": "1.5h",
-                    "priority": 4,
-                    "lat": center_lat + 0.001,
-                    "lng": center_lon + 0.001,
-                    "recommended_duration": "1.5h",
-                    "best_time": "12:30-14:00",
-                    "order": len(suggested_places) + 1,
-                    "is_intercity": False,
-                    "suggested": True,
-                    "suggestion_reason": f"Sugerencia complementaria para {day_date}",
-                    "google_places_verified": False
-                }
-            ]
+            # Crear sugerencias fallback dinámicamente hasta llegar a 3
+            fallback_categories = ["restaurant", "tourist_attraction", "shopping_mall"]
+            fallback_names = ["Restaurante local recomendado", "Atracción turística local", "Centro comercial cercano"]
             
-            suggested_places.extend(fallback_places)
+            current_count = len(suggested_places)
+            for i in range(3 - current_count):
+                if i < len(fallback_categories):
+                    fallback_place = {
+                        "id": f"suggested-{day_date}-fallback-{i+1}",
+                        "name": fallback_names[i],
+                        "category": fallback_categories[i],
+                        "rating": 4.2,
+                        "image": "",
+                        "description": f"Sugerencia local - {fallback_names[i]}",
+                        "estimated_time": "1.5h",
+                        "priority": 4,
+                        "lat": center_lat + (i * 0.001),
+                        "lng": center_lon + (i * 0.001),
+                        "recommended_duration": "1.5h",
+                        "best_time": "12:30-14:00",
+                        "order": current_count + i + 1,
+                        "is_intercity": False,
+                        "suggested": True,
+                        "suggestion_reason": f"Sugerencia complementaria para {day_date}",
+                        "google_places_verified": False,
+                        "synthetic": True
+                    }
+                    suggested_places.append(fallback_place)
         
         logger.info(f"🎉 Generadas {len(suggested_places)} sugerencias inteligentes para {day_date}")
         return suggested_places
@@ -4037,7 +4042,7 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
     except Exception as e:
         logger.error(f"❌ Error generando sugerencias inteligentes para {day_date}: {e}")
         
-        # 🔄 Fallback completo si todo falla
+        # 🔄 Fallback completo si todo falla - exactamente 3 sugerencias
         fallback_suggestions = [
             {
                 "id": f"suggested-{day_date}-emergency-1",
@@ -4056,7 +4061,8 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                 "is_intercity": False,
                 "suggested": True,
                 "suggestion_reason": f"Sugerencia automática para {day_date}",
-                "google_places_verified": False
+                "google_places_verified": False,
+                "synthetic": True
             },
             {
                 "id": f"suggested-{day_date}-emergency-2",
@@ -4075,7 +4081,28 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                 "is_intercity": False,
                 "suggested": True,
                 "suggestion_reason": f"Sugerencia automática para {day_date}",
-                "google_places_verified": False
+                "google_places_verified": False,
+                "synthetic": True
+            },
+            {
+                "id": f"suggested-{day_date}-emergency-3",
+                "name": "Actividad recreativa",
+                "category": "park",
+                "rating": 4.0,
+                "image": "",
+                "description": f"Parque o actividad al aire libre para {day_date}",
+                "estimated_time": "1.5h",
+                "priority": 3,
+                "lat": center_lat + 0.002,
+                "lng": center_lon + 0.002,
+                "recommended_duration": "1.5h",
+                "best_time": "15:00-17:00",
+                "order": 3,
+                "is_intercity": False,
+                "suggested": True,
+                "suggestion_reason": f"Sugerencia automática para {day_date}",
+                "google_places_verified": False,
+                "synthetic": True
             }
         ]
         
