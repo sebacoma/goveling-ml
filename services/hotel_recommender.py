@@ -395,10 +395,244 @@ class HotelRecommender:
             return "antofagasta"
         elif -22.5 <= lat <= -22.4:  # Calama
             return "calama"
-        else:  # Default a Santiago
+        elif -35.0 <= lat <= -32.0:  # Santiago y alrededores
             return "santiago"
+        else:  # Para ubicaciones internacionales, devolver None
+            return None
     
-    def recommend_hotels(self, places: List[Dict], max_recommendations: int = 5, 
+    def _generate_synthetic_hotels(self, centroid: Tuple[float, float], places: List[Dict], price_preference: str = "medium") -> List[Dict]:
+        """Generar hoteles sintéticos ubicados estratégicamente cerca del centroide de POIs"""
+        lat, lon = centroid
+        self.logger.info(f"🏗️ Generando hoteles sintéticos para centroide ({lat:.4f}, {lon:.4f})")
+        
+        # Determinar ciudad aproximada basándose en coordenadas conocidas
+        city_name = self._infer_international_city(lat, lon)
+        self.logger.info(f"📍 Ciudad inferida: {city_name}")
+        
+        # 🎯 ESTRATEGIA DE UBICACIÓN: Hotel principal en el centroide exacto
+        synthetic_hotels = []
+        
+        # Usar hoteles realistas para la ciudad
+        realistic_hotels = self._get_realistic_hotels_for_city(city_name)
+        
+        # Si no hay suficientes hoteles realistas, agregar genéricos
+        hotel_types = realistic_hotels + [
+            ("Hotel Plaza", "high"),
+            ("Hotel Centro", "medium"),
+            ("Hotel Boutique", "high"),
+            ("Hotel Ejecutivo", "medium"),
+            ("Hotel Business", "medium"),
+            ("Hotel Comfort", "low")
+        ]
+        
+        for i, (hotel_type, price_range) in enumerate(hotel_types):
+            # Filtrar por preferencia de precio
+            if price_preference != "any" and price_range != price_preference:
+                continue
+            
+            if i == 0:
+                # 🎯 HOTEL PRINCIPAL: Ubicado exactamente en el centroide para optimización
+                hotel_lat, hotel_lon = lat, lon
+                hotel_name = hotel_type  # Usar nombre realista directamente
+                address = f"Centro de {city_name}"
+            else:
+                # Hoteles alternativos con offset pequeño
+                offset_lat = lat + (i * 0.002)  # Offset más pequeño (220m aprox)
+                offset_lon = lon + (i * 0.002)
+                hotel_lat, hotel_lon = offset_lat, offset_lon
+                hotel_name = hotel_type  # Usar nombre realista directamente
+                address = f"Cerca del centro de {city_name}"
+                
+            synthetic_hotels.append({
+                "name": hotel_name,
+                "lat": hotel_lat,
+                "lon": hotel_lon,
+                "address": address,
+                "rating": round(4.2 + (i * 0.05), 1),  # Ratings entre 4.2 y 4.4
+                "price_range": price_range,
+                "synthetic": True,
+                "centroid_optimized": i == 0  # Marcar el hotel principal como optimizado para centroide
+            })
+        
+        # Priorizar el hotel centroide si existe
+        if synthetic_hotels:
+            synthetic_hotels.sort(key=lambda h: (not h.get('centroid_optimized', False), h.get('rating', 0)))
+        
+        self.logger.info(f"🏨 Hoteles sintéticos generados: {len(synthetic_hotels)}")
+        for i, hotel in enumerate(synthetic_hotels[:3]):
+            self.logger.info(f"   {i+1}. {hotel['name']} ({hotel['lat']:.4f}, {hotel['lon']:.4f})")
+        
+        return synthetic_hotels[:3]  # Máximo 3 hoteles sintéticos
+    
+    async def _search_hotels_with_google_places(self, centroid: Tuple[float, float], price_preference: str = "any") -> List[Dict]:
+        """Buscar hoteles reales usando Google Places API"""
+        try:
+            lat, lon = centroid
+            
+            # Usar GooglePlacesService para buscar hoteles/alojamientos
+            from services.google_places_service import GooglePlacesService
+            places_service = GooglePlacesService()
+            
+            # Buscar lodging/accommodation cerca del centroide - intentar múltiples tipos
+            places_data = None
+            
+            # Intentar primero con 'lodging'
+            places_data = await places_service._google_nearby_search(
+                lat=lat,
+                lon=lon,
+                radius=5000,  # 5km radius
+                types=['lodging'],
+                type='lodging',
+                limit=10
+            )
+            
+            # Si no encuentra con 'lodging', intentar con 'accommodation'
+            if not places_data or not places_data.get('results'):
+                places_data = await places_service._google_nearby_search(
+                    lat=lat,
+                    lon=lon,
+                    radius=8000,  # Ampliar radio a 8km
+                    types=['accommodation'],
+                    type='accommodation',
+                    limit=10
+                )
+            
+            hotels = []
+            if places_data and places_data.get('results'):
+                self.logger.info(f"🏨 Google Places devolvió {len(places_data['results'])} hoteles")
+                for place in places_data['results'][:5]:  # Máximo 5 hoteles
+                    location = place.get('geometry', {}).get('location', {})
+                    place_lat = location.get('lat', lat)
+                    place_lon = location.get('lng', lon)
+                    
+                    # Mapear price_level de Google Places a nuestros rangos
+                    google_price_level = place.get('price_level', 2)  # Default medium
+                    price_range = self._map_google_price_to_range(google_price_level)
+                    
+                    hotel_name = place.get('name', 'Hotel')
+                    self.logger.info(f"   📍 {hotel_name} - Price level: {google_price_level} -> {price_range}")
+                    
+                    # Filtrar por preferencia de precio si se especifica
+                    if price_preference != "any" and price_range != price_preference:
+                        self.logger.info(f"   ❌ {hotel_name} filtrado por precio (quiere: {price_preference}, tiene: {price_range})")
+                        continue
+                    
+                    self.logger.info(f"   ✅ {hotel_name} incluido")
+                    
+                    hotel = {
+                        "name": place.get('name', 'Hotel'),
+                        "lat": place_lat,
+                        "lon": place_lon,
+                        "address": place.get('vicinity', ''),
+                        "rating": place.get('rating', 4.0),
+                        "price_range": price_range,
+                        "google_place_id": place.get('place_id'),
+                        "synthetic": False,  # Es un hotel real de Google Places
+                        "source": "google_places"
+                    }
+                    hotels.append(hotel)
+            
+            if hotels:
+                self.logger.info(f"✅ Google Places encontró {len(hotels)} hoteles")
+                return hotels
+            else:
+                self.logger.warning("❌ Google Places no encontró hoteles")
+                return []  # Retornar lista vacía para activar el fallback
+                
+        except Exception as e:
+            self.logger.error(f"Error buscando hoteles con Google Places: {e}")
+            return []
+    
+    def _map_google_price_to_range(self, price_level: int) -> str:
+        """Mapear price_level de Google Places (0-4) a nuestros rangos"""
+        if price_level <= 1:
+            return "low"
+        elif price_level <= 2:
+            return "medium" 
+        else:
+            return "high"
+    
+    def _infer_international_city(self, lat: float, lon: float) -> str:
+        """Inferir ciudad internacional basándose en coordenadas"""
+        # Ciudades conocidas con hoteles realistas
+        international_cities = [
+            # Estados Unidos - Florida
+            (28.5383, -81.3792, "Orlando"),
+            (25.7617, -80.1918, "Miami"),
+            
+            # Estados Unidos - Otras ciudades principales
+            (40.7128, -74.0060, "Nueva York"),
+            (34.0522, -118.2437, "Los Ángeles"),
+            (41.8781, -87.6298, "Chicago"),
+            
+            # México
+            (19.4326, -99.1332, "Ciudad de México"),
+            (20.6597, -103.3496, "Guadalajara"),
+            
+            # Brasil
+            (-23.5505, -46.6333, "São Paulo"),
+            (-22.9068, -43.1729, "Río de Janeiro"),
+            
+            # Argentina
+            (-34.6118, -58.3960, "Buenos Aires"),
+            
+            # Perú
+            (-12.0464, -77.0428, "Lima")
+        ]
+        
+        min_distance = float('inf')
+        closest_city = "Ciudad Internacional"
+        
+        for city_lat, city_lon, city_name in international_cities:
+            distance = ((lat - city_lat) ** 2 + (lon - city_lon) ** 2) ** 0.5
+            if distance < min_distance:
+                min_distance = distance
+                closest_city = city_name
+        
+        return closest_city
+    
+    def _get_realistic_hotels_for_city(self, city_name: str) -> List[Tuple[str, str]]:
+        """Obtener nombres de hoteles realistas por ciudad"""
+        realistic_hotels = {
+            "Orlando": [
+                ("Grand Bohemian Orlando", "high"),
+                ("Embassy Suites Orlando Downtown", "medium"),
+                ("Hampton Inn & Suites Orlando Downtown", "medium"),
+                ("Hilton Orlando Lake Buena Vista", "high"),
+                ("Holiday Inn Express Orlando Downtown", "low")
+            ],
+            "Miami": [
+                ("The Ritz-Carlton South Beach", "high"),
+                ("Fontainebleau Miami Beach", "high"),
+                ("Hampton Inn & Suites Miami Downtown", "medium"),
+                ("Holiday Inn Express Miami Airport", "low"),
+                ("InterContinental Miami", "high")
+            ],
+            "Nueva York": [
+                ("The Plaza Hotel", "high"),
+                ("Hampton Inn Manhattan Times Square", "medium"),
+                ("Holiday Inn Express Manhattan", "low"),
+                ("The Westin New York", "high"),
+                ("Courtyard by Marriott Manhattan", "medium")
+            ],
+            "Los Ángeles": [
+                ("The Beverly Hills Hotel", "high"),
+                ("Hollywood Roosevelt Hotel", "medium"),
+                ("Hampton Inn & Suites LAX", "medium"),
+                ("Holiday Inn Express Hollywood", "low"),
+                ("The Standard Downtown LA", "medium")
+            ]
+        }
+        
+        return realistic_hotels.get(city_name, [
+            ("Grand Hotel Central", "high"),
+            ("Plaza Hotel", "medium"),
+            ("Business Hotel", "medium"),
+            ("Express Inn", "low"),
+            ("City Center Hotel", "medium")
+        ])
+    
+    async def recommend_hotels(self, places: List[Dict], max_recommendations: int = 5, 
                         price_preference: str = "any") -> List[HotelRecommendation]:
         """
         Recomendar hoteles basado en ubicación de lugares
@@ -418,10 +652,32 @@ class HotelRecommender:
         # Determinar ciudad basado en el centroide
         city = self.determine_city(centroid[0])
         
-        # Filtrar hoteles por preferencia de precio
-        available_hotels = self.hotel_database[city]
-        if price_preference != "any":
-            available_hotels = [h for h in available_hotels if h['price_range'] == price_preference]
+        # Verificar si tenemos hoteles para esta ciudad
+        if city in self.hotel_database:
+            # Filtrar hoteles por preferencia de precio
+            available_hotels = self.hotel_database[city]
+            if price_preference != "any":
+                available_hotels = [h for h in available_hotels if h['price_range'] == price_preference]
+        else:
+            # Para ubicaciones internacionales, usar Google Places API primero
+            try:
+                self.logger.info("🔍 Intentando buscar hoteles con Google Places...")
+                # Ahora podemos usar await correctamente
+                google_hotels = await self._search_hotels_with_google_places(centroid, price_preference)
+                if google_hotels:
+                    self.logger.info(f"✅ Google Places encontró {len(google_hotels)} hoteles")
+                    available_hotels = google_hotels
+                else:
+                    self.logger.info("⚠️ Google Places no encontró hoteles, generando hoteles sintéticos...")
+                    # Fallback a hoteles sintéticos si Google Places falla
+                    available_hotels = self._generate_synthetic_hotels(centroid, places, price_preference)
+                    self.logger.info(f"🤖 Generados {len(available_hotels)} hoteles sintéticos")
+            except Exception as e:
+                self.logger.warning(f"Error buscando hoteles con Google Places: {e}")
+                self.logger.info("🤖 Fallback: Generando hoteles sintéticos...")
+                # Fallback a hoteles sintéticos
+                available_hotels = self._generate_synthetic_hotels(centroid, places, price_preference)
+                self.logger.info(f"🤖 Generados {len(available_hotels)} hoteles sintéticos como fallback")
         
         # Calcular scores para cada hotel
         recommendations = []

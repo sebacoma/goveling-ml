@@ -1001,19 +1001,27 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
         # 3. Si no hay accommodations, recomendar automáticamente
         if no_original_accommodations:
             logger.info("🤖 No se encontraron accommodations, recomendando hotel automáticamente...")
+            logger.info(f"📋 Lugares antes de hotel: {[p.get('name', 'Sin nombre') for p in normalized_places]}")
             try:
                 from services.hotel_recommender import HotelRecommender
                 hotel_recommender = HotelRecommender()
                 
+                logger.info(f"📍 Buscando hoteles para {len(normalized_places)} lugares")
+                
                 # Recomendar el mejor hotel basado en los lugares de entrada
-                recommendations = hotel_recommender.recommend_hotels(
+                recommendations = await hotel_recommender.recommend_hotels(
                     normalized_places, 
                     max_recommendations=1, 
-                    price_preference="mid"
+                    price_preference="any"  # Cambiar a "any" para aceptar cualquier precio
                 )
+                
+                logger.info(f"🏨 Hotel recommender devolvió {len(recommendations)} recomendaciones")
                 
                 if recommendations:
                     best_hotel = recommendations[0]
+                    logger.info(f"✅ Mejor hotel encontrado: {best_hotel.name}")
+                    logger.info(f"📍 Ubicación: ({best_hotel.lat:.4f}, {best_hotel.lon:.4f})")
+                    
                     # Agregar el hotel recomendado a la lista de lugares
                     hotel_place = {
                         'name': best_hotel.name,
@@ -1036,6 +1044,7 @@ async def generate_hybrid_itinerary_endpoint(request: ItineraryRequest):
                     normalized_places.append(hotel_place)
                     logger.info(f"✅ Hotel recomendado agregado: {best_hotel.name} ({best_hotel.rating}⭐)")
                     logger.info(f"🔍 DEBUG: Hotel agregado con _auto_recommended=True y {len(normalized_places)} lugares totales")
+                    logger.info(f"📋 Lugares actuales: {[p.get('name', 'Sin nombre') for p in normalized_places]}")
                 else:
                     logger.warning("⚠️ No se pudo recomendar ningún hotel automáticamente")
                     

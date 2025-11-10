@@ -1269,8 +1269,8 @@ class HybridOptimizerV31:
         for cluster in clusters:
             try:
                 # Primero intentar con el hotel recommender
-                recommendations = self.hotel_recommender.recommend_hotels(
-                    cluster.places, max_recommendations=1, price_preference="mid"
+                recommendations = await self.hotel_recommender.recommend_hotels(
+                    cluster.places, max_recommendations=1, price_preference="any"
                 )
                 
                 if recommendations:
@@ -1452,8 +1452,8 @@ class HybridOptimizerV31:
     async def _generate_accommodation_suggestions(self, cluster: Cluster):
         """Generar Top-3 sugerencias de alojamiento por cluster"""
         try:
-            suggestions = self.hotel_recommender.recommend_hotels(
-                cluster.places, max_recommendations=3, price_preference="mid"
+            suggestions = await self.hotel_recommender.recommend_hotels(
+                cluster.places, max_recommendations=3, price_preference="any"
             )
             
             cluster.suggested_accommodations = [
