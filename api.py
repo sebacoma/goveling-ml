@@ -199,44 +199,158 @@ def _count_semantic_place_types(places: List[Dict]) -> List[str]:
     return list(semantic_types)
 
 async def _detect_multiple_cities_from_places(places: List[Dict]) -> List[str]:
-    """Detectar si el itinerario cruza múltiples ciudades"""
-    cities = set()
+    """Detectar si el itinerario cruza múltiples ciudades usando clustering geográfico"""
+    from utils.ortools_decision_engine import ORToolsDecisionEngine
     
-    for place in places:
-        # Extraer ciudad del nombre o coordenadas
-        city = await _extract_city_from_place(place)
-        if city:
-            cities.add(city.lower())
-    
-    return list(cities)
+    try:
+        # Usar clustering automático de ORTools
+        decision_engine = ORToolsDecisionEngine()
+        clusters = decision_engine._detect_geographic_clusters(places)
+        
+        if len(clusters) == 0:
+            return []
+        elif len(clusters) == 1:
+            # Una sola ciudad/área
+            cluster = clusters[0]
+            return [f"cluster_{cluster['center_lat']:.1f}_{cluster['center_lon']:.1f}"]
+        else:
+            # Múltiples clusters = múltiples ciudades
+            cities = []
+            for i, cluster in enumerate(clusters):
+                cities.append(f"city_{i+1}_{cluster['places_count']}_places")
+            
+            logger.info(f"🏙️ Detectados {len(clusters)} clusters geográficos: {cities}")
+            return cities
+            
+    except Exception as e:
+        logger.warning(f"⚠️ Error en clustering automático, usando método legacy: {e}")
+        
+        # Fallback al método anterior
+        cities = set()
+        for place in places:
+            city = await _extract_city_from_place(place)
+            if city:
+                cities.add(city.lower())
+        
+        return list(cities)
 
 async def _extract_city_from_place(place: Dict) -> Optional[str]:
-    """Extraer ciudad de un lugar (por nombre o coordenadas)"""
+    """Extraer ciudad de un lugar usando reverse geocoding automático"""
     
-    # Método 1: Extraer de nombre del lugar
+    # Extraer coordenadas del lugar
+    lat = lon = None
+    
+    # Método 1: Coordenadas directas
+    if isinstance(place, dict):
+        lat = place.get('lat')
+        lon = place.get('lon')
+        if lat is None:
+            lat = place.get('latitude')
+        if lon is None:
+            lon = place.get('longitude')
+    else:
+        lat = getattr(place, 'lat', None)
+        lon = getattr(place, 'lon', None)
+    
+    if lat is None or lon is None:
+        logger.debug(f"⚠️ No se pudieron extraer coordenadas del lugar")
+        return None
+    
+    try:
+        # Método 2a: Si viene de Google Places, usar Place ID para detalles completos
+        google_place_id = None
+        if isinstance(place, dict):
+            google_place_id = place.get('google_place_id') or place.get('place_id')
+        else:
+            google_place_id = getattr(place, 'google_place_id', None) or getattr(place, 'place_id', None)
+        
+        if google_place_id and google_place_id.startswith('ChIJ'):  # Google Place IDs start with ChIJ
+            from utils.google_maps_client import GoogleMapsClient
+            
+            client = GoogleMapsClient()
+            place_details = await client.get_place_details_by_id(google_place_id)
+            
+            if place_details and place_details.get('address_components'):
+                # Extraer ciudad de los componentes de dirección
+                for component in place_details['address_components']:
+                    types = component.get('types', [])
+                    if 'locality' in types:
+                        detected_city = component['long_name'].lower()
+                        logger.info(f"🏙️ Ciudad detectada desde Google Place ID: {detected_city}")
+                        return detected_city
+                    elif 'administrative_area_level_2' in types:  # Fallback
+                        detected_city = component['long_name'].lower()
+                        logger.info(f"🏛️ Área administrativa detectada desde Google Place ID: {detected_city}")
+                        return detected_city
+        
+        # Método 2b: Reverse geocoding con coordenadas como fallback
+        from utils.google_maps_client import GoogleMapsClient
+        
+        client = GoogleMapsClient()
+        city_info = await client.reverse_geocode_city(float(lat), float(lon))
+        
+        if city_info and city_info.get('city'):
+            detected_city = city_info['city'].lower()
+            logger.info(f"🌍 Ciudad detectada por reverse geocoding: {detected_city} ({lat:.4f}, {lon:.4f})")
+            return detected_city
+        
+    except Exception as e:
+        logger.debug(f"⚠️ Error en detección con Google Places: {e}")
+    
+    # Método 3: Fallback por dirección si está disponible
+    address = ""
+    if hasattr(place, 'address'):
+        address = place.address.lower()
+    elif isinstance(place, dict) and 'address' in place:
+        address = place['address'].lower()
+    
+    if address:
+        # Extraer ciudad de la dirección usando patrones comunes
+        import re
+        
+        # Patrón: "... Ciudad, País" o "... Ciudad ..."
+        city_patterns = [
+            r'\b([a-záéíóúñü\s]+),\s*([a-záéíóúñü]+)$',  # "Barcelona, España"
+            r'\b(\w+)\s+\d{5}',  # "Paris 75001"
+            r'\b(\w+),\s*\w+$',  # "Orlando, FL"
+        ]
+        
+        for pattern in city_patterns:
+            match = re.search(pattern, address, re.IGNORECASE)
+            if match:
+                potential_city = match.group(1).strip().lower()
+                # Validar que no sea un número de calle
+                if not potential_city.isdigit() and len(potential_city) > 2:
+                    logger.info(f"🏠 Ciudad extraída de dirección: {potential_city}")
+                    return potential_city
+    
+    # Método 4: Como último recurso, extraer del nombre del lugar
+    place_name = ""
     if hasattr(place, 'name'):
         place_name = place.name
     elif isinstance(place, dict) and 'name' in place:
         place_name = place['name']
-    else:
-        place_name = ""
     
-    # Ciudades chilenas conocidas en nombres
-    known_cities = [
-        "santiago", "valparaíso", "viña", "concepción", "antofagasta", 
-        "la serena", "iquique", "puerto montt", "temuco", "rancagua",
-        "talca", "arica", "chillán", "osorno", "calama", "copiapó",
-        "valdivia", "punta arenas", "quilpué", "curicó"
-    ]
+    if place_name:
+        # Buscar patrones como "Torre Eiffel, París" o "Sagrada Familia Barcelona"
+        import re
+        
+        name_patterns = [
+            r'[,\s]+([a-záéíóúñü\s]{3,})[,\s]*$',  # Después de coma o espacios
+            r'\b([a-záéíóúñü]{4,})\s*$',  # Última palabra si es larga
+        ]
+        
+        for pattern in name_patterns:
+            match = re.search(pattern, place_name.lower())
+            if match:
+                potential_city = match.group(1).strip()
+                # Evitar palabras comunes que no son ciudades
+                excluded_words = ['hotel', 'restaurant', 'museum', 'park', 'center', 'centro', 'tower', 'torre']
+                if potential_city not in excluded_words and len(potential_city) > 3:
+                    logger.info(f"📍 Ciudad extraída del nombre: {potential_city}")
+                    return potential_city
     
-    place_name_lower = place_name.lower()
-    for city in known_cities:
-        if city in place_name_lower:
-            return city
-    
-    # Método 2: TODO - Reverse geocoding con coordenadas (implementar si es necesario)
-    # Por ahora retornar None si no se detecta ciudad en nombre
-    
+    logger.debug(f"❓ No se pudo detectar ciudad para lugar en ({lat:.4f}, {lon:.4f})")
     return None
 
 def _calculate_geographic_spread(places: List[Dict]) -> float:
@@ -251,18 +365,34 @@ def _calculate_geographic_spread(places: List[Dict]) -> float:
         # Extraer coordenadas del place
         lat, lon = None, None
         
-        if hasattr(place, 'coordinates'):
-            if hasattr(place.coordinates, 'latitude'):
-                lat, lon = place.coordinates.latitude, place.coordinates.longitude
-            elif isinstance(place.coordinates, dict):
-                lat, lon = place.coordinates.get('latitude'), place.coordinates.get('longitude')
-        elif isinstance(place, dict) and 'coordinates' in place:
-            coords = place['coordinates']
-            if isinstance(coords, dict):
-                lat, lon = coords.get('latitude'), coords.get('longitude')
+        # Método 1: Coordenadas directas (formato del frontend)
+        if isinstance(place, dict):
+            lat = place.get('lat', place.get('latitude'))
+            lon = place.get('lon', place.get('longitude'))
+        
+        # Método 2: Atributos del objeto
+        if lat is None and hasattr(place, 'lat'):
+            lat = place.lat
+        if lon is None and hasattr(place, 'lon'):
+            lon = place.lon
+            
+        # Método 3: Formato coordinates anidado
+        if lat is None or lon is None:
+            if hasattr(place, 'coordinates'):
+                if hasattr(place.coordinates, 'latitude'):
+                    lat, lon = place.coordinates.latitude, place.coordinates.longitude
+                elif isinstance(place.coordinates, dict):
+                    lat, lon = place.coordinates.get('latitude'), place.coordinates.get('longitude')
+            elif isinstance(place, dict) and 'coordinates' in place:
+                coords = place['coordinates']
+                if isinstance(coords, dict):
+                    lat, lon = coords.get('latitude'), coords.get('longitude')
         
         if lat is not None and lon is not None:
-            coordinates.append((float(lat), float(lon)))
+            try:
+                coordinates.append((float(lat), float(lon)))
+            except (ValueError, TypeError):
+                continue
     
     if len(coordinates) < 2:
         return 0.0
@@ -3177,6 +3307,10 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
         total_days_requested = (end_date - start_date).days + 1
         days_with_activities = len(itinerary_days)
         
+        # 🔄 Cache global para evitar sugerencias repetidas entre días
+        used_place_ids_global = set()
+        day_counter = 1
+        
         logger.info(f"🔍 DÍAS LIBRES DEBUG: total_solicitados={total_days_requested}, días_con_actividades={days_with_activities}")
         logger.info(f"📅 Fechas existentes en itinerary: {[day.get('date', 'NO_DATE') for day in itinerary_days]}")
         
@@ -3254,8 +3388,9 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
                     logger.info(f"📍 Rellenando día existente vacío {day_date} con sugerencias")
                     # 🎯 Generar sugerencias REALES con Google Places para el día existente
                     suggested_places = await generate_smart_suggestions_for_day(
-                        places_service, center_lat, center_lon, day_date, request
+                        places_service, center_lat, center_lon, day_date, request, day_counter, used_place_ids_global
                     )
+                    day_counter += 1
                     # Reemplazar el contenido del día existente
                     existing['places'] = suggested_places
                     existing['total_places'] = len(suggested_places)
@@ -3272,7 +3407,7 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
                     
                     # 🎯 Generar sugerencias REALES con Google Places para día vacío
                     suggested_places = await generate_smart_suggestions_for_day(
-                        places_service, center_lat, center_lon, day_date, request
+                        places_service, center_lat, center_lon, day_date, request, day_counter, used_place_ids_global
                     )
                     
                     # Crear día con sugerencias
@@ -3294,6 +3429,7 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
                     # Evitar duplicar si por alguna razón ya existe
                     if not any(d.get('date') == day_date for d in itinerary_days):
                         itinerary_days.append(empty_day_formatted)
+                        day_counter += 1
                         logger.info(f"✅ Día vacío {day_date} creado con {len(suggested_places)} sugerencias")
                     else:
                         logger.info(f"⚠️ Día {day_date} ya existía en el itinerario, se omitió creación")
@@ -3821,17 +3957,22 @@ async def get_performance_statistics():
 
 # ===== FUNCIONES AUXILIARES PARA SUGERENCIAS INTELIGENTES =====
 
-async def generate_smart_suggestions_for_day(places_service, center_lat, center_lon, day_date, request):
+async def generate_smart_suggestions_for_day(places_service, center_lat, center_lon, day_date, request, day_number=1, used_place_ids=None):
     """
-    🎯 Generar sugerencias inteligentes usando Google Places API real
+    🎯 Generar sugerencias inteligentes usando Google Places API real con VARIEDAD
     
     Features:
     - ✨ Google Places API real para lugares auténticos
     - 🏷️ Personalización basada en preferencias del usuario  
     - 📍 Lugares populares y bien valorados de la zona
     - ⭐ Ratings, reviews y información detallada
+    - 🔄 Variedad por día - evita repetir lugares
     """
     suggested_places = []
+    
+    # Cache global de lugares ya usados para evitar repeticiones
+    if used_place_ids is None:
+        used_place_ids = set()
     
     try:
         # Obtener preferencias del usuario
@@ -3847,24 +3988,39 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
             'any': [1, 2, 3, 4] # Todos los niveles
         }
         
-        # 🎯 Categorías priorizadas por intereses del usuario
-        search_categories = []
-        if 'tourist_attraction' in interests:
-            search_categories.extend(['tourist_attraction', 'point_of_interest'])
-        if 'restaurant' in interests or 'food' in interests:
-            search_categories.append('restaurant')
-        if 'museum' in interests or 'culture' in interests:
-            search_categories.extend(['museum', 'art_gallery'])
-        if 'nature' in interests:
-            search_categories.extend(['park', 'natural_feature'])
+        # 🎯 Categorías priorizadas por intereses del usuario con ROTACIÓN por día
+        all_categories = []
+        if 'tourist_attraction' in interests or 'culture' in str(user_preferences):
+            all_categories.extend(['tourist_attraction', 'point_of_interest', 'museum', 'art_gallery'])
+        if 'restaurant' in interests or 'food' in str(user_preferences):
+            all_categories.extend(['restaurant', 'cafe', 'bakery'])
+        if 'nature' in interests or 'nature' in str(user_preferences):
+            all_categories.extend(['park', 'natural_feature', 'zoo'])
         if 'shopping' in interests:
-            search_categories.extend(['shopping_mall', 'store'])
+            all_categories.extend(['shopping_mall', 'store', 'department_store'])
         if 'nightlife' in interests:
-            search_categories.extend(['night_club', 'bar'])
+            all_categories.extend(['night_club', 'bar', 'casino'])
         
         # Fallback si no hay preferencias específicas
-        if not search_categories:
-            search_categories = ['tourist_attraction', 'restaurant', 'point_of_interest']
+        if not all_categories:
+            all_categories = [
+                'tourist_attraction', 'restaurant', 'point_of_interest', 
+                'museum', 'park', 'art_gallery', 'cafe', 'shopping_mall'
+            ]
+        
+        # 🔄 Rotar categorías según el número del día para crear variedad
+        day_offset = (day_number - 1) * 3  # Cada día usa 3 categorías diferentes
+        search_categories = []
+        for i in range(3):  # Solo 3 categorías por día
+            category_index = (day_offset + i) % len(all_categories)
+            search_categories.append(all_categories[category_index])
+        
+        logger.info(f"🎲 Día {day_number}: Categorías rotadas = {search_categories}")
+        
+        # 📍 Variar también el radio de búsqueda según el día para más diversidad
+        base_radius = 8000  # 8km base
+        radius_variation = (day_number % 3) * 2000  # +0km, +2km, +4km según día
+        search_radius = base_radius + radius_variation
         
         order_counter = 1
         logger.info(f"🔍 Generando sugerencias para categorías: {search_categories}")
@@ -3874,13 +4030,13 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
             try:
                 logger.info(f"🔍 Buscando {category} cerca de {center_lat:.4f}, {center_lon:.4f}")
                 
-                # 🎯 Parámetros de búsqueda optimizados para calidad
+                # 🎯 Parámetros de búsqueda optimizados para calidad con variedad
                 search_params = {
                     "query": f"best {category.replace('_', ' ')} popular top rated must visit",
                     "location": f"{center_lat},{center_lon}",
-                    "radius": 10000,  # 10km radius para más opciones
+                    "radius": search_radius,  # Radio variable según día
                     "place_type": category,
-                    "limit": 1,  # Solo 1 por categoría para no sobrecargar
+                    "limit": 3,  # Buscar 3 para tener opciones y evitar repetidos
                     "min_rating": 4.0  # Solo lugares bien valorados
                 }
                 
@@ -3897,7 +4053,27 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                     limit=search_params["limit"]
                 )
                 
+                # 🚫 Filtrar lugares ya usados para evitar repeticiones
+                filtered_suggestions = []
                 for suggestion in real_suggestions:
+                    place_id = suggestion.get('place_id', '')
+                    suggestion_name = suggestion.get('name', '').lower()
+                    
+                    # Evitar lugares ya usados por ID o nombre similar
+                    if place_id and place_id not in used_place_ids:
+                        # También evitar nombres muy similares
+                        name_already_used = any(
+                            suggestion_name in used_name.lower() or used_name.lower() in suggestion_name
+                            for used_name in [p.get('name', '') for p in suggested_places]
+                        )
+                        
+                        if not name_already_used:
+                            filtered_suggestions.append(suggestion)
+                            used_place_ids.add(place_id)
+                            break  # Solo tomar 1 por categoría para mantener límite
+                
+                # Procesar solo las sugerencias filtradas
+                for suggestion in filtered_suggestions:
                     # ⏰ Calcular tiempo estimado basado en tipo de lugar
                     duration_map = {
                         'restaurant': ("1.5h", "12:00-14:00"),

@@ -575,3 +575,162 @@ class GoogleMapsClient:
         except Exception as e:
             logging.error(f"💥 Error en search_nearby_places: {e}")
             return []
+    
+    @cache_google_api(ttl=7200)  # 2 horas de caché para geocoding
+    async def reverse_geocode_city(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+        """
+        🌍 Reverse geocoding para detectar ciudad automáticamente
+        
+        Args:
+            lat: Latitud
+            lon: Longitud
+            
+        Returns:
+            Dict con información de la ciudad o None si falla
+        """
+        try:
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+            
+            url = f"{self.base_url}/geocode/json"
+            params = {
+                'latlng': f"{lat},{lon}",
+                'key': self.api_key,
+                'result_type': 'locality|administrative_area_level_1|administrative_area_level_2',
+                'language': 'es'  # Respuesta en español
+            }
+            
+            logging.debug(f"🌍 Reverse geocoding para ({lat:.4f}, {lon:.4f})")
+            
+            async with self.session.get(url, params=params) as response:
+                if response.status != 200:
+                    logging.warning(f"⚠️ Google Geocoding API error: {response.status}")
+                    return None
+                
+                data = await response.json()
+                
+                if data.get('status') != 'OK' or not data.get('results'):
+                    logging.debug(f"❌ No se encontraron resultados de geocoding")
+                    return None
+                
+                # Procesar resultados para encontrar la ciudad
+                for result in data['results']:
+                    components = result.get('address_components', [])
+                    
+                    city_info = {
+                        'city': None,
+                        'state': None,
+                        'country': None,
+                        'country_code': None,
+                        'formatted_address': result.get('formatted_address', '')
+                    }
+                    
+                    for component in components:
+                        types = component.get('types', [])
+                        
+                        # Buscar ciudad (locality)
+                        if 'locality' in types:
+                            city_info['city'] = component['long_name']
+                        
+                        # Buscar estado/región
+                        elif 'administrative_area_level_1' in types:
+                            city_info['state'] = component['long_name']
+                        
+                        # Buscar país
+                        elif 'country' in types:
+                            city_info['country'] = component['long_name']
+                            city_info['country_code'] = component['short_name']
+                    
+                    # Si encontramos ciudad, retornar
+                    if city_info['city']:
+                        logging.info(f"✅ Ciudad detectada: {city_info['city']}, {city_info['country']}")
+                        return city_info
+                
+                # Si no encontramos locality, usar administrative_area_level_2 como fallback
+                for result in data['results']:
+                    components = result.get('address_components', [])
+                    
+                    for component in components:
+                        types = component.get('types', [])
+                        
+                        if 'administrative_area_level_2' in types:
+                            city_info = {
+                                'city': component['long_name'],
+                                'state': None,
+                                'country': None,
+                                'country_code': None,
+                                'formatted_address': result.get('formatted_address', '')
+                            }
+                            
+                            # Buscar país en el mismo resultado
+                            for comp in components:
+                                if 'country' in comp.get('types', []):
+                                    city_info['country'] = comp['long_name']
+                                    city_info['country_code'] = comp['short_name']
+                            
+                            logging.info(f"✅ Área administrativa detectada como ciudad: {city_info['city']}")
+                            return city_info
+                
+                logging.debug("❓ No se pudo extraer información de ciudad del geocoding")
+                return None
+                
+        except Exception as e:
+            logging.error(f"💥 Error en reverse_geocode_city: {e}")
+            return None
+    
+    @cache_google_api(ttl=7200)  # 2 horas de caché para place details
+    async def get_place_details_by_id(self, place_id: str) -> Optional[Dict[str, Any]]:
+        """
+        🎯 Obtener detalles completos de un lugar usando su Google Place ID
+        
+        Args:
+            place_id: ID del lugar de Google Places (ej: ChIJ...)
+            
+        Returns:
+            Dict con detalles del lugar o None si falla
+        """
+        try:
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+            
+            url = f"{self.base_url}/place/details/json"
+            params = {
+                'place_id': place_id,
+                'key': self.api_key,
+                'fields': 'address_components,formatted_address,geometry,name,place_id,types,rating,user_ratings_total',
+                'language': 'es'
+            }
+            
+            logging.debug(f"🎯 Obteniendo detalles para Place ID: {place_id}")
+            
+            async with self.session.get(url, params=params) as response:
+                if response.status != 200:
+                    logging.warning(f"⚠️ Google Places Details API error: {response.status}")
+                    return None
+                
+                data = await response.json()
+                
+                if data.get('status') != 'OK' or not data.get('result'):
+                    logging.debug(f"❌ No se encontraron detalles para Place ID: {place_id}")
+                    return None
+                
+                result = data['result']
+                
+                # Procesar y estructurar la respuesta
+                place_details = {
+                    'place_id': result.get('place_id'),
+                    'name': result.get('name'),
+                    'formatted_address': result.get('formatted_address'),
+                    'address_components': result.get('address_components', []),
+                    'types': result.get('types', []),
+                    'rating': result.get('rating'),
+                    'user_ratings_total': result.get('user_ratings_total'),
+                    'geometry': result.get('geometry', {})
+                }
+                
+                logging.info(f"✅ Detalles obtenidos para: {place_details.get('name', place_id)}")
+                return place_details
+                
+        except Exception as e:
+            logging.error(f"💥 Error en get_place_details_by_id: {e}")
+            return None

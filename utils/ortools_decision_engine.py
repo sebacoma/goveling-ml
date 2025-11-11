@@ -386,7 +386,7 @@ class ORToolsDecisionEngine:
         return True
     
     def _detect_city(self, request_data: Dict) -> Optional[str]:
-        """🏙️ Detectar ciudad principal del itinerario"""
+        """🏙️ Detectar ciudad principal del itinerario usando clustering automático"""
         places = request_data.get("places", [])
         
         if not places:
@@ -398,26 +398,112 @@ class ORToolsDecisionEngine:
             if city:
                 return city
         
-        # Detección por coordenadas (aproximada para Chile)
-        # Podrían expandirse estas reglas
+        # 🔧 NUEVO: Detección automática usando clustering geográfico
+        try:
+            clusters = self._detect_geographic_clusters(places)
+            
+            if len(clusters) == 1:
+                # Una sola ciudad detectada
+                cluster = clusters[0]
+                return f"city_cluster_{cluster['center_lat']:.2f}_{cluster['center_lon']:.2f}"
+            elif len(clusters) > 1:
+                # Múltiples ciudades - retornar la más grande
+                largest_cluster = max(clusters, key=lambda c: c['places_count'])
+                return f"multi_city_{len(clusters)}_clusters"
+            else:
+                # No se pudieron formar clusters
+                return "single_location"
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error en clustering automático: {e}")
+        
+        # Fallback: usar coordenadas promedio
         lats = [p.get("lat", p.get("latitude", 0)) for p in places if p.get("lat") or p.get("latitude")]
         lons = [p.get("lon", p.get("longitude", 0)) for p in places if p.get("lon") or p.get("longitude")]
         
         if lats and lons:
             avg_lat = sum(lats) / len(lats)
             avg_lon = sum(lons) / len(lons)
-            
-            # Reglas aproximadas para ciudades chilenas principales
-            if -33.6 <= avg_lat <= -33.3 and -70.8 <= avg_lon <= -70.5:
-                return "santiago"
-            elif -33.1 <= avg_lat <= -32.9 and -71.7 <= avg_lon <= -71.5:
-                return "valparaiso"
-            elif -23.7 <= avg_lat <= -23.6 and -70.5 <= avg_lon <= -70.3:
-                return "antofagasta"
-            elif -29.9 <= avg_lat <= -29.8 and -71.3 <= avg_lon <= -71.2:
-                return "la_serena"
+            return f"location_{avg_lat:.2f}_{avg_lon:.2f}"
         
         return None
+    
+    def _detect_geographic_clusters(self, places: List[Dict]) -> List[Dict]:
+        """🗺️ Detectar clusters geográficos automáticamente usando DBSCAN"""
+        from sklearn.cluster import DBSCAN
+        import numpy as np
+        from math import radians
+        
+        if len(places) < 2:
+            return []
+        
+        # Extraer coordenadas válidas
+        coordinates = []
+        valid_places = []
+        
+        for place in places:
+            lat = place.get("lat", place.get("latitude"))
+            lon = place.get("lon", place.get("longitude"))
+            
+            if lat is not None and lon is not None:
+                try:
+                    lat, lon = float(lat), float(lon)
+                    if -90 <= lat <= 90 and -180 <= lon <= 180:
+                        coordinates.append([radians(lat), radians(lon)])
+                        valid_places.append(place)
+                except (ValueError, TypeError):
+                    continue
+        
+        if len(coordinates) < 2:
+            return []
+        
+        # DBSCAN con métrica haversine (distancia en esfera terrestre)
+        # eps = 100km en radianes (100km / 6371km radio tierra)
+        eps_km = 100  # 100km threshold para considerar mismo cluster
+        eps_radians = eps_km / 6371.0
+        
+        clustering = DBSCAN(
+            eps=eps_radians,
+            min_samples=1,  # Mínimo 1 lugar por cluster
+            metric='haversine'
+        ).fit(coordinates)
+        
+        # Agrupar por clusters
+        clusters_dict = {}
+        for i, label in enumerate(clustering.labels_):
+            if label == -1:  # Noise points - crear cluster individual
+                label = f"noise_{i}"
+            
+            if label not in clusters_dict:
+                clusters_dict[label] = []
+            clusters_dict[label].append((valid_places[i], coordinates[i]))
+        
+        # Convertir a formato de retorno
+        clusters = []
+        for cluster_id, cluster_places in clusters_dict.items():
+            if len(cluster_places) == 0:
+                continue
+                
+            # Calcular centro del cluster
+            lats = [place[1][0] for place in cluster_places]  # radianes
+            lons = [place[1][1] for place in cluster_places]  # radianes
+            
+            center_lat = sum(lats) / len(lats)
+            center_lon = sum(lons) / len(lons)
+            
+            # Convertir de radianes a grados
+            center_lat_deg = center_lat * 180 / 3.14159
+            center_lon_deg = center_lon * 180 / 3.14159
+            
+            clusters.append({
+                'cluster_id': cluster_id,
+                'places_count': len(cluster_places),
+                'center_lat': center_lat_deg,
+                'center_lon': center_lon_deg,
+                'places': [place[0] for place in cluster_places]
+            })
+        
+        return clusters
     
     def _analyze_geography(self, request_data: Dict) -> Dict[str, Any]:
         """🗺️ Análisis geográfico del itinerario"""

@@ -10,6 +10,11 @@ export ENABLE_CACHE=true
 export CACHE_TTL_SECONDS=300
 export MAX_CONCURRENT_REQUESTS=3
 
+# ORTools Configuration (CRITICAL for optimal performance)
+export ENABLE_ORTOOLS=true
+export ORTOOLS_USER_PERCENTAGE=100
+export ENABLE_CITY2GRAPH=true
+
 # Render-specific optimizations
 export API_HOST=0.0.0.0
 export API_PORT=${PORT:-8000}
