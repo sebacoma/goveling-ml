@@ -3140,10 +3140,53 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
         
         logger.info(f"🔧 Configuración multi-modal activada")
         
-        # Usar el optimizador híbrido existente pero con router multi-modal
-        from utils.hybrid_optimizer_v31 import optimize_itinerary_hybrid_v31
+        # 🎯 DECISIÓN INTELIGENTE: ¿Usar ORTools o sistema legacy?
+        decision = await should_use_city2graph(request)
+        use_ortools = decision.get('use_city2graph', False)
+        complexity_score = decision.get('complexity_score', 0.0)
         
-        optimization_result = await optimize_itinerary_hybrid_v31(
+        logger.info(f"🧠 Decisión algoritmo: {'ORTools' if use_ortools else 'Legacy'} (score: {complexity_score})")
+        
+        if use_ortools and settings.ENABLE_ORTOOLS:
+            # 🚀 USAR ORTools para casos complejos (multi-ciudad, rutas largas)
+            logger.info(f"🚀 Usando ORTools para optimización avanzada")
+            
+            try:
+                from services.city2graph_ortools_service import get_ortools_service
+                ortools_service = await get_ortools_service()
+                
+                # Preparar request para ORTools
+                ortools_request = {
+                    'places': normalized_places,
+                    'start_date': start_date.isoformat(),
+                    'end_date': end_date.isoformat(),
+                    'daily_start_hour': request.daily_start_hour,
+                    'daily_end_hour': request.daily_end_hour,
+                    'transport_mode': str(request.transport_mode),
+                    'accommodations': request.accommodations or [],
+                    'preferences': request.preferences or {},
+                    'max_walking_distance_km': request.max_walking_distance_km,
+                    'max_daily_activities': request.max_daily_activities
+                }
+                
+                optimization_result = await ortools_service.optimize_with_ortools(ortools_request)
+                
+                # Marcar que se usó ORTools
+                if optimization_result:
+                    optimization_result['optimization_mode'] = 'ortools_advanced'
+                    optimization_result['decision_factors'] = decision.get('factors', {})
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ ORTools falló, usando fallback: {e}")
+                use_ortools = False
+        
+        if not use_ortools:
+            # 🔄 USAR sistema legacy para casos simples o fallback
+            logger.info(f"🔄 Usando sistema legacy híbrido")
+            
+            from utils.hybrid_optimizer_v31 import optimize_itinerary_hybrid_v31
+            
+            optimization_result = await optimize_itinerary_hybrid_v31(
             normalized_places,
             start_date,
             end_date,
@@ -4179,34 +4222,52 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                 suggested_places.append(fallback_suggestion)
                 order_counter += 1
         
-        # 🛡️ Asegurar exactamente 3 sugerencias por día
+        # 🛡️ Asegurar exactamente 3 sugerencias por día con VARIEDAD
         while len(suggested_places) < 3:
             logger.warning(f"⚠️ Solo {len(suggested_places)} sugerencias encontradas para {day_date}, agregando fallback")
             
-            # Crear sugerencias fallback dinámicamente hasta llegar a 3
-            fallback_categories = ["restaurant", "tourist_attraction", "shopping_mall"]
-            fallback_names = ["Restaurante local recomendado", "Atracción turística local", "Centro comercial cercano"]
+            # 🎲 Crear sugerencias fallback VARIADAS por día para evitar repetición
+            fallback_options = [
+                # Día 1 opciones
+                [("restaurant", "Café parisino tradicional"), ("museum", "Galería de arte local"), ("park", "Jardín urbano cercano")],
+                # Día 2 opciones  
+                [("shopping_mall", "Mercado local típico"), ("tourist_attraction", "Monumento histórico"), ("cafe", "Pastelería artesanal")],
+                # Día 3 opciones
+                [("point_of_interest", "Mirador panorámico"), ("restaurant", "Bistro de barrio"), ("library", "Centro cultural local")],
+                # Día 4+ opciones (ciclar)
+                [("art_gallery", "Espacio creativo"), ("park", "Plaza principal"), ("restaurant", "Cocina regional")]
+            ]
+            
+            # Seleccionar opciones basadas en día para garantizar variedad
+            day_cycle = (day_number - 1) % len(fallback_options)
+            day_fallbacks = fallback_options[day_cycle]
             
             current_count = len(suggested_places)
             for i in range(3 - current_count):
-                if i < len(fallback_categories):
+                if i < len(day_fallbacks):
+                    category, name = day_fallbacks[i]
+                    
+                    # Generar coordenadas ligeramente diferentes para cada sugerencia
+                    lat_offset = (i + day_number * 0.5) * 0.001  # Variación por día y posición
+                    lon_offset = (i + day_number * 0.3) * 0.001
+                    
                     fallback_place = {
-                        "id": f"suggested-{day_date}-fallback-{i+1}",
-                        "name": fallback_names[i],
-                        "category": fallback_categories[i],
-                        "rating": 4.2,
+                        "id": f"suggested-{day_date}-varied-{i+1}",
+                        "name": name,
+                        "category": category,
+                        "rating": 4.1 + (i * 0.1),  # Ratings ligeramente diferentes 
                         "image": "",
-                        "description": f"Sugerencia local - {fallback_names[i]}",
+                        "description": f"Sugerencia día {day_number} - {name}",
                         "estimated_time": "1.5h",
                         "priority": 4,
-                        "lat": center_lat + (i * 0.001),
-                        "lng": center_lon + (i * 0.001),
+                        "lat": center_lat + lat_offset,
+                        "lng": center_lon + lon_offset,
                         "recommended_duration": "1.5h",
                         "best_time": "12:30-14:00",
                         "order": current_count + i + 1,
                         "is_intercity": False,
                         "suggested": True,
-                        "suggestion_reason": f"Sugerencia complementaria para {day_date}",
+                        "suggestion_reason": f"Sugerencia variada para {day_date} (día {day_number})",
                         "google_places_verified": False,
                         "synthetic": True
                     }
