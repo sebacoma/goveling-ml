@@ -216,9 +216,20 @@ class ORToolsDecisionEngine:
     
     def _calculate_semantic_diversity(self, places: List[Dict]) -> int:
         """Contar tipos semánticos diferentes"""
+        def get_place_attr(place, *attrs):
+            """Helper para obtener atributos de Place objects o dicts"""
+            for attr in attrs:
+                if hasattr(place, attr):
+                    value = getattr(place, attr)
+                    if value is not None:
+                        return value
+                elif isinstance(place, dict) and attr in place:
+                    return place[attr]
+            return "unknown"
+        
         types = set()
         for place in places:
-            place_type = place.get("type", place.get("place_type", "unknown"))
+            place_type = get_place_attr(place, "type", "place_type")
             types.add(place_type)
         return len(types)
     
@@ -393,8 +404,19 @@ class ORToolsDecisionEngine:
             return None
         
         # Buscar ciudad en metadatos de lugares
+        def get_place_attr(place, *attrs):
+            """Helper para obtener atributos de Place objects o dicts"""
+            for attr in attrs:
+                if hasattr(place, attr):
+                    value = getattr(place, attr)
+                    if value is not None:
+                        return value
+                elif isinstance(place, dict) and attr in place:
+                    return place[attr]
+            return None
+        
         for place in places:
-            city = place.get("city", place.get("locality", place.get("address_components", {}).get("locality")))
+            city = get_place_attr(place, "city", "locality")
             if city:
                 return city
         
@@ -441,9 +463,20 @@ class ORToolsDecisionEngine:
         coordinates = []
         valid_places = []
         
+        def get_place_attr(place, *attrs):
+            """Helper para obtener atributos de Place objects o dicts"""
+            for attr in attrs:
+                if hasattr(place, attr):
+                    value = getattr(place, attr)
+                    if value is not None:
+                        return value
+                elif isinstance(place, dict) and attr in place:
+                    return place[attr]
+            return None
+        
         for place in places:
-            lat = place.get("lat", place.get("latitude"))
-            lon = place.get("lon", place.get("longitude"))
+            lat = get_place_attr(place, "lat", "latitude")
+            lon = get_place_attr(place, "lon", "longitude")
             
             if lat is not None and lon is not None:
                 try:

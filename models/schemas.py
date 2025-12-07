@@ -156,6 +156,35 @@ class Place(BaseModel):
     class Config:
         populate_by_name = True
 
+class DailySchedule(BaseModel):
+    """Horarios personalizados para un día específico"""
+    date: str = Field(..., description="Fecha en formato YYYY-MM-DD")
+    start_hour: int = Field(..., ge=0, le=23, description="Hora de inicio del día (0-23)")
+    end_hour: int = Field(..., ge=0, le=23, description="Hora de fin del día (0-23)")
+    
+    @validator('date')
+    def validate_date_format(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+            return v
+        except ValueError:
+            raise ValueError('La fecha debe estar en formato YYYY-MM-DD')
+    
+    @validator('end_hour')
+    def validate_hours(cls, v, values):
+        if 'start_hour' in values and v <= values['start_hour']:
+            raise ValueError('end_hour debe ser mayor que start_hour')
+        return v
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "date": "2025-11-10",
+                "start_hour": 11,
+                "end_hour": 18
+            }
+        }
+
 class Activity(BaseModel):
     place: str
     start: str
@@ -175,8 +204,9 @@ class ItineraryRequest(BaseModel):
     start_date: Union[date, str]
     end_date: Union[date, str]
     transport_mode: Union[TransportMode, str] = TransportMode.WALK
-    daily_start_hour: int = Field(default=9, ge=6, le=12)
-    daily_end_hour: int = Field(default=18, ge=15, le=23)
+    daily_start_hour: int = Field(default=9, ge=6, le=12, description="Hora de inicio por defecto para todos los días")
+    daily_end_hour: int = Field(default=18, ge=15, le=23, description="Hora de fin por defecto para todos los días")
+    custom_schedules: Optional[List[DailySchedule]] = Field(default=None, description="Horarios personalizados para días específicos")
     max_walking_distance_km: Optional[float] = Field(default=15.0, ge=1, le=50)
     max_daily_activities: int = Field(default=6, ge=1, le=10)
     preferences: Optional[Dict] = Field(default_factory=dict)

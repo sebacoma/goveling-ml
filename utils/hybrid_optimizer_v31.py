@@ -3723,10 +3723,27 @@ async def _optimize_classic_method(
                 first_day_hotel = (first_cluster.home_base['lat'], first_cluster.home_base['lon'])
                 break
     
+    # 🆕 Extraer horarios personalizados si existen
+    custom_schedules = extra_info.get('custom_schedules', {}) if extra_info else {}
+    
     # Crear lista ordenada de fechas para tener índice de día
     for day_index, date_str in enumerate(sorted_dates):
         day_number = day_index + 1  # Día 1, 2, 3, etc.
         assigned_clusters = day_assignments[date_str]
+        
+        # 🆕 Obtener horarios para este día específico
+        if date_str in custom_schedules:
+            day_start_hour = custom_schedules[date_str]['start_hour']
+            day_end_hour = custom_schedules[date_str]['end_hour']
+            day_time_window = TimeWindow(
+                start=day_start_hour * 60,
+                end=day_end_hour * 60
+            )
+            logging.info(f"⏰ {date_str}: Horario personalizado {day_start_hour}:00-{day_end_hour}:00")
+        else:
+            day_time_window = time_window  # Usar horario por defecto
+            day_start_hour = daily_start_hour
+            day_end_hour = daily_end_hour
         
         if not assigned_clusters:
             # Día libre con sugerencias - usar ubicación del último día activo
@@ -3734,7 +3751,7 @@ async def _optimize_classic_method(
             
             # Usar función enhanced para generar sugerencias reales con variedad por día
             free_blocks_objects = await optimizer._generate_free_blocks_enhanced(
-                time_window.start, time_window.end, effective_location, day_number
+                day_time_window.start, day_time_window.end, effective_location, day_number
             )
             
             # Convertir objetos FreeBlock a diccionarios
@@ -3766,7 +3783,13 @@ async def _optimize_classic_method(
                     "intercity_transfers_count": 0,
                     "intercity_total_minutes": 0
                 },
-                "free_minutes": time_window.end - time_window.start
+                "free_minutes": day_time_window.end - day_time_window.start,
+                "schedule_info": {  # 🆕 Agregar info de horarios
+                    "start_hour": day_start_hour,
+                    "end_hour": day_end_hour,
+                    "available_hours": day_end_hour - day_start_hour,
+                    "custom_schedule": date_str in custom_schedules
+                }
             })
             continue
         
@@ -3776,8 +3799,16 @@ async def _optimize_classic_method(
             start_location = first_day_hotel
             
         day_result = await optimizer.route_day_enhanced(
-            date_str, assigned_clusters, time_window, transport_mode, start_location, day_number, extra_info
+            date_str, assigned_clusters, day_time_window, transport_mode, start_location, day_number, extra_info
         )
+        
+        # 🆕 Agregar info de horarios al resultado del día
+        day_result['schedule_info'] = {
+            "start_hour": day_start_hour,
+            "end_hour": day_end_hour,
+            "available_hours": day_end_hour - day_start_hour,
+            "custom_schedule": date_str in custom_schedules
+        }
         days.append(day_result)
         previous_end_location = day_result.get('end_location')
         

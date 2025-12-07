@@ -42,19 +42,24 @@ class GooglePlacesService:
             for attempt in range(2):  # 2 intentos
                 try:
                     if hasattr(self.maps_client, 'search_nearby_places'):
+                        self.logger.info(f"🔍 [INTENTO {attempt+1}] Llamando search_nearby_places: lat={lat:.4f}, lon={lon:.4f}, types={types}, radius={radius_m}")
                         results = await self.maps_client.search_nearby_places(
                             lat, lon, types, radius_m, limit
                         )
+                        self.logger.info(f"📊 [INTENTO {attempt+1}] Google Maps API devolvió: {len(results) if results else 0} resultados")
                         if results and len(results) >= limit:
-                            self.logger.debug(f"✅ Google Maps client: {len(results)} lugares encontrados")
+                            self.logger.info(f"✅ Google Maps client: {len(results)} lugares encontrados - USANDO REALES")
                             return results[:limit]
+                        elif results and len(results) > 0:
+                            self.logger.warning(f"⚠️ Google Maps devolvió solo {len(results)} lugares de {limit} solicitados - USANDO LOS QUE HAY")
+                            return results
                         else:
                             # Si Google Maps no devuelve suficientes resultados, usar sintéticas
-                            self.logger.debug(f"⚠️ Google Maps insuficiente, usando sintéticas")
+                            self.logger.warning(f"⚠️ Google Maps sin resultados (attempt {attempt+1}), usando sintéticas")
                             return self._generate_synthetic_suggestions(lat, lon, types, limit)
                     else:
                         # Fallback: generar sugerencias sintéticas basadas en ubicación
-                        self.logger.debug(f"🤖 Generando sugerencias sintéticas para {lat:.3f},{lon:.3f}")
+                        self.logger.warning(f"🤖 Método search_nearby_places no disponible, usando sintéticas para {lat:.3f},{lon:.3f}")
                         return self._generate_synthetic_suggestions(lat, lon, types, limit)
                         
                 except Exception as e:

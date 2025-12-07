@@ -3128,6 +3128,16 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
             place_dict['duration_minutes'] = place_dict.get('duration_minutes', 
                                                           calculate_visit_duration(place_dict.get('type', 'point_of_interest')))
             normalized_places.append(place_dict)
+        
+        # 🆕 Crear mapa de horarios personalizados por fecha
+        custom_schedule_map = {}
+        if request.custom_schedules:
+            for schedule in request.custom_schedules:
+                custom_schedule_map[schedule.date] = {
+                    'start_hour': schedule.start_hour,
+                    'end_hour': schedule.end_hour
+                }
+            logger.info(f"⏰ Horarios personalizados configurados para {len(custom_schedule_map)} días: {list(custom_schedule_map.keys())}")
             
         # Configurar extra_info para el optimizador
         extra_info = {
@@ -3135,7 +3145,8 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
             'max_walking_distance_km': request.max_walking_distance_km,
             'max_daily_activities': request.max_daily_activities,
             'preferences': request.preferences or {},
-            'multimodal_router_instance': get_chile_router()
+            'multimodal_router_instance': get_chile_router(),
+            'custom_schedules': custom_schedule_map  # 🆕 Agregar horarios personalizados
         }
         
         logger.info(f"🔧 Configuración multi-modal activada")
@@ -3417,9 +3428,11 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
                 if request.places:
                     center_lat = sum(p.lat for p in request.places) / len(request.places)
                     center_lon = sum(p.lon for p in request.places) / len(request.places)
+                    logger.info(f"📍 Centro calculado para sugerencias: {center_lat:.4f}, {center_lon:.4f} (basado en {len(request.places)} lugares)")
                 else:
                     # Default: Orlando como fallback
                     center_lat, center_lon = 28.5383, -81.3792
+                    logger.warning(f"📍 Usando coordenadas por defecto: {center_lat:.4f}, {center_lon:.4f}")
                 
                 # Detectar días existentes en el itinerario que están vacíos (0 places)
                 existing_empty_days = [d for d in itinerary_days if len(d.get('places', [])) == 0]
@@ -4088,6 +4101,7 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                     search_params["price_levels"] = price_levels[budget_level]
                 
                 # 🌟 Buscar lugares reales con Google Places
+                logger.info(f"🔍 Llamando Google Places API: lat={center_lat:.4f}, lon={center_lon:.4f}, types={[category]}, radius={search_params['radius']}")
                 real_suggestions = await places_service.search_nearby(
                     lat=center_lat,
                     lon=center_lon,
@@ -4095,6 +4109,7 @@ async def generate_smart_suggestions_for_day(places_service, center_lat, center_
                     radius_m=search_params["radius"],
                     limit=search_params["limit"]
                 )
+                logger.info(f"📊 Google Places API devolvió: {len(real_suggestions)} resultados para {category}")
                 
                 # 🚫 Filtrar lugares ya usados para evitar repeticiones
                 filtered_suggestions = []
