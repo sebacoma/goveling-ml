@@ -3300,7 +3300,8 @@ async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
                 "is_suggested": is_suggested,
                 "base": day.get("base"),
                 "free_blocks": day.get("free_blocks", []),
-                "actionable_recommendations": day.get("actionable_recommendations", [])
+                "actionable_recommendations": day.get("actionable_recommendations", []),
+                "schedule_info": day.get("schedule_info")  # 🆕 Preservar horarios personalizados
             }
             
             itinerary_days.append(day_data)
