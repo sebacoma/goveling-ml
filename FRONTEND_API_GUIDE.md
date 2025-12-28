@@ -66,6 +66,78 @@
 - `places[].priority`: 1-10 (default: 5)
 - `places[].min_duration_hours`: 0.5-8 (calculado automáticamente)
 
+### 🆕 NUEVAS FUNCIONALIDADES (Dic 2025)
+
+#### 1. Horarios Personalizados por Día (`custom_schedules`)
+Permite definir horarios específicos para días particulares, sobrescribiendo los horarios por defecto:
+
+```json
+{
+  "places": [...],
+  "start_date": "2025-11-10",
+  "end_date": "2025-11-12",
+  "daily_start_hour": 9,
+  "daily_end_hour": 18,
+  "custom_schedules": [
+    {
+      "date": "2025-11-10",
+      "start_hour": 11,
+      "end_hour": 18
+    },
+    {
+      "date": "2025-11-12",
+      "start_hour": 9,
+      "end_hour": 15
+    }
+  ]
+}
+```
+
+**Casos de uso:**
+- Primer día con llegada tarde
+- Último día con salida temprano
+- Días con eventos específicos que reducen tiempo disponible
+- Flexibilidad según preferencias del usuario
+
+#### 2. Información de Horarios en Respuesta
+
+**Horarios por Día (`schedule_info`):**
+Cada día ahora incluye información sobre su configuración horaria:
+
+```json
+{
+  "day": 1,
+  "date": "2025-11-10",
+  "schedule_info": {
+    "start_hour": 11,
+    "end_hour": 18,
+    "available_hours": 7,
+    "custom_schedule": true
+  },
+  "places": [...]
+}
+```
+
+**Horarios por Actividad (`arrival_time` y `departure_time`):**
+Cada lugar ahora incluye horarios específicos en formato HH:MM:
+
+```json
+{
+  "id": "uuid",
+  "name": "Torre Eiffel",
+  "arrival_time": "09:37",
+  "departure_time": "11:07",
+  "duration_minutes": 90,
+  "order": 1
+}
+```
+
+**Beneficios para el Frontend:**
+- Mostrar timeline visual del día
+- Sincronizar con calendarios
+- Notificaciones basadas en horarios
+- Mejor experiencia de usuario
+
 #### ✅ Response:
 ```json
 {
