@@ -3067,7 +3067,10 @@ def format_activity_for_frontend_simple(activity, order, activities=None, idx=No
     
     if is_intercity:
         # Es un transfer - formato diferente
-        return {
+        start_time = get_value(activity, 'start_time')
+        end_time = get_value(activity, 'end_time')
+        
+        transfer_data = {
             "id": str(uuid.uuid4()),
             "name": get_value(activity, 'name', 'Transfer'),
             "transfer_type": "intercity",
@@ -3078,10 +3081,27 @@ def format_activity_for_frontend_simple(activity, order, activities=None, idx=No
             "transport_mode": get_value(activity, 'recommended_mode', 'drive'),
             "order": order
         }
+        
+        # Agregar tiempos si están disponibles
+        if start_time is not None:
+            hours = start_time // 60
+            minutes = start_time % 60
+            transfer_data["departure_time"] = f"{hours:02d}:{minutes:02d}"
+            
+        if end_time is not None:
+            hours = end_time // 60
+            minutes = end_time % 60
+            transfer_data["arrival_time"] = f"{hours:02d}:{minutes:02d}"
+            
+        return transfer_data
     else:
         # Es un lugar normal
         duration_min = get_value(activity, 'duration_minutes', 60)
-        return {
+        start_time = get_value(activity, 'start_time')
+        end_time = get_value(activity, 'end_time')
+        
+        # Construir respuesta base
+        place_data = {
             "id": str(uuid.uuid4()),
             "name": get_value(activity, 'name', 'Lugar sin nombre'),
             "category": get_value(activity, 'type', get_value(activity, 'place_type', 'point_of_interest')),
@@ -3097,6 +3117,19 @@ def format_activity_for_frontend_simple(activity, order, activities=None, idx=No
             "order": order,
             "walking_time_minutes": 0  # Por ahora simplificado
         }
+        
+        # Agregar tiempos si están disponibles (formato HH:MM)
+        if start_time is not None:
+            hours = start_time // 60
+            minutes = start_time % 60
+            place_data["arrival_time"] = f"{hours:02d}:{minutes:02d}"
+            
+        if end_time is not None:
+            hours = end_time // 60
+            minutes = end_time % 60
+            place_data["departure_time"] = f"{hours:02d}:{minutes:02d}"
+            
+        return place_data
 
 @app.post("/itinerary/multimodal", response_model=ItineraryResponse, tags=["Multi-Modal Itinerary"])
 async def generate_multimodal_itinerary_endpoint(request: ItineraryRequest):
